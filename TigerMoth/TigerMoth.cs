@@ -95,6 +95,10 @@ public class TigerMothPlugin : BaseUnityPlugin
             if (_rbField != null)
                 _rb = (Rigidbody2D)_rbField.GetValue(_moth);
 
+            // Remember default zoom
+            if (Camera.main != null)
+                _defaultZoom = Camera.main.orthographicSize;
+
             // SpeedrunSplits / Split reflection
             _splitsRunningField = typeof(SpeedrunSplits).GetField("running", flags);
             _splitsListField = typeof(SpeedrunSplits).GetField("splits", flags);
@@ -128,15 +132,62 @@ public class TigerMothPlugin : BaseUnityPlugin
 
         if (Input.GetKeyDown(KeyCode.LeftBracket))
         {
-            Singleton<AdvancedCamera>.Instance.targetSize -= 2f;
-            Camera.main.orthographicSize = Singleton<AdvancedCamera>.Instance.targetSize;
+            _zoomSteps--;
+            ApplyZoom();
         }
 
         if (Input.GetKeyDown(KeyCode.RightBracket))
         {
-            Singleton<AdvancedCamera>.Instance.targetSize += 2f;
-            Camera.main.orthographicSize = Singleton<AdvancedCamera>.Instance.targetSize;
+            _zoomSteps++;
+            ApplyZoom();
         }
+    }
+
+    private void ApplyZoom()
+    {
+        float size = _defaultZoom + _zoomSteps * 2f;
+        Singleton<AdvancedCamera>.Instance.targetSize = size;
+        Camera.main.orthographicSize = size;
+    }
+
+    private GUIStyle _labelStyle;
+    private GUIStyle _headerStyle;
+    private float _defaultZoom;
+    private int _zoomSteps;
+
+    void OnGUI()
+    {
+        if (_moth == null)
+            return;
+
+        if (_labelStyle == null)
+        {
+            _labelStyle = new GUIStyle(GUI.skin.label);
+            _labelStyle.fontSize = 24;
+            _labelStyle.normal.textColor = new Color(1f, 1f, 1f, 0.7f);
+
+            _headerStyle = new GUIStyle(GUI.skin.label);
+            _headerStyle.fontSize = 24;
+            _headerStyle.fontStyle = FontStyle.Bold;
+            _headerStyle.normal.textColor = new Color(1f, 1f, 1f, 0.9f);
+        }
+
+        float x = 10f;
+        float y = 10f;
+        float lineHeight = 32f;
+
+        GUI.Label(new Rect(x, y, 500, lineHeight), "TigerMoth", _headerStyle);
+        y += lineHeight;
+        GUI.Label(new Rect(x, y, 500, lineHeight), "H  Save state", _labelStyle);
+        y += lineHeight;
+        GUI.Label(new Rect(x, y, 500, lineHeight), "I  Load state", _labelStyle);
+        y += lineHeight;
+        GUI.Label(new Rect(x, y, 500, lineHeight), "[  Zoom in    ]  Zoom out", _labelStyle);
+        y += lineHeight;
+
+        string zoomStr = _zoomSteps == 0 ? "0" : (_zoomSteps > 0 ? "+" + _zoomSteps : _zoomSteps.ToString());
+        GUI.Label(new Rect(x, y, 500, lineHeight),
+            string.Format("Zoom: {0}", zoomStr), _labelStyle);
     }
 
     private void SaveState()
