@@ -12,14 +12,13 @@ public class TigerMothPlugin : BaseUnityPlugin
     private static readonly string[] SplitNames = { "Double Jump", "Foot", "End" };
 
     // ── Harmony: block game's NewSplit after we take over ─
-    internal static bool _blockGameSplits;
-
     [HarmonyPatch(typeof(SpeedrunSplits), "NewSplit")]
     private class PatchNewSplit
     {
         static bool Prefix(bool first)
         {
-            return !_blockGameSplits || first;
+            var plugin = FindObjectOfType<TigerMothPlugin>();
+            return plugin == null || !plugin._runActive || first;
         }
     }
 
@@ -67,7 +66,6 @@ public class TigerMothPlugin : BaseUnityPlugin
     private bool _pendingLoad;
 
     // Reflection — MothController
-    private FieldInfo _rbField;
     private FieldInfo _jumpsField;
     private FieldInfo _maxJumpsField;
     private FieldInfo _chargingTimeField;
@@ -94,9 +92,17 @@ public class TigerMothPlugin : BaseUnityPlugin
     // Reflection — Animator
     private FieldInfo _animatorField;
 
+    // Reflection — ScreenTransition, AdvancedCamera, SaveSystem (cached for load)
+    private FieldInfo _maskField;
+    private FieldInfo _pureTransformField;
+    private MethodInfo _saveSystemClearMethod;
+    private object _saveSystemGameBucket;
+
     // TMP auto-sizing — disable on created splits so font size matches
     private PropertyInfo _tmpAutoSizingProperty;
-    private PropertyInfo _tmpFontSizeProperty;
+
+    // Cached scene objects
+    private ExtraJump _extraJump;
 
     // Split management
     private List<Split> _managedSplits = new List<Split>();
@@ -133,7 +139,6 @@ public class TigerMothPlugin : BaseUnityPlugin
             _moth = moth;
 
             var flags = BindingFlags.Instance | BindingFlags.NonPublic;
-            _rbField = typeof(MothController).GetField("rb", flags);
             _jumpsField = typeof(MothController).GetField("jumps", flags);
             _maxJumpsField = typeof(MothController).GetField("maxJumps", flags);
             _chargingTimeField = typeof(MothController).GetField("chargingTime", flags);
@@ -142,14 +147,15 @@ public class TigerMothPlugin : BaseUnityPlugin
             _hitstopField = typeof(MothController).GetField("hitstopActive", flags);
             _queuedJumpField = typeof(MothController).GetField("queuedJump", flags);
             _velocityBeforeHitstopField = typeof(MothController).GetField("velocityBeforeHitstop", flags);
+            _animatorField = typeof(MothController).GetField("animator", flags);
 
-            if (_rbField != null)
-                _rb = (Rigidbody2D)_rbField.GetValue(_moth);
+            var rbField = typeof(MothController).GetField("rb", flags);
+            if (rbField != null)
+                _rb = (Rigidbody2D)rbField.GetValue(_moth);
 
             if (Camera.main != null)
                 _defaultZoom = Camera.main.orthographicSize;
 
-            // SpeedrunSplits / Split reflection
             _splitsRunningField = typeof(SpeedrunSplits).GetField("running", flags);
             _splitsListField = typeof(SpeedrunSplits).GetField("splits", flags);
             _splitPrefabField = typeof(SpeedrunSplits).GetField("splitPrefab", flags | BindingFlags.Public);
@@ -158,12 +164,19 @@ public class TigerMothPlugin : BaseUnityPlugin
             _splitLabelField = typeof(Split).GetField("label", flags);
             _splitTimerTextField = typeof(Split).GetField("timerText", flags);
 
-            // ExtraJump reflection (instance found fresh each scene load)
             _extraJumpUsedField = typeof(ExtraJump).GetField("used", flags);
             _extraJumpFunctionalChildField = typeof(ExtraJump).GetField("functionalChild", flags);
+            _extraJump = FindObjectOfType<ExtraJump>();
 
-            // Animator reflection
-            _animatorField = typeof(MothController).GetField("animator", flags);
+            _maskField = typeof(ScreenTransition).GetField("mask", flags | BindingFlags.Public);
+            _pureTransformField = typeof(AdvancedCamera).GetField("pureTransform", flags);
+
+            if (_saveSystemClearMethod == null)
+            {
+                var bucketType = typeof(SaveSystem).GetNestedType("BucketName");
+                _saveSystemGameBucket = System.Enum.Parse(bucketType, "Game");
+                _saveSystemClearMethod = typeof(SaveSystem).GetMethod("Clear");
+            }
 
             // Find "The Foot" collider for area-based split trigger
             foreach (var lta in FindObjectsOfType<LocationTitleArea>())
@@ -187,16 +200,11 @@ public class TigerMothPlugin : BaseUnityPlugin
             _pendingLoad = false;
             // Skip the iris transition — just show the scene immediately
             var st = Singleton<ScreenTransition>.Instance;
-            if (st != null)
+            if (st != null && _maskField != null)
             {
-                var maskField = typeof(ScreenTransition).GetField("mask",
-                    BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                if (maskField != null)
-                {
-                    var mask = (GameObject)maskField.GetValue(st);
-                    LeanTween.cancel(mask);
-                    mask.transform.localScale = Vector3.one * 10000f;
-                }
+                var mask = (GameObject)_maskField.GetValue(st);
+                LeanTween.cancel(mask);
+                mask.transform.localScale = Vector3.one * 10000f;
             }
             ApplyState();
             return;
@@ -241,16 +249,11 @@ public class TigerMothPlugin : BaseUnityPlugin
         _moth = null;
         _rb = null;
         _runActive = false;
-        _blockGameSplits = false;
         _managedSplits.Clear();
         _currentSplitIndex = -1;
 
         LeanTween.cancelAll();
-        // Call SaveSystem.Clear(BucketName.Game) via reflection to avoid
-        // netstandard reference issue with the BucketName enum
-        var bucketType = typeof(SaveSystem).GetNestedType("BucketName");
-        var gameValue = System.Enum.Parse(bucketType, "Game");
-        typeof(SaveSystem).GetMethod("Clear").Invoke(null, new object[] { gameValue });
+        _saveSystemClearMethod.Invoke(null, new object[] { _saveSystemGameBucket });
         SceneManager.LoadScene(SceneManager.GetActiveScene().buildIndex);
     }
 
@@ -268,7 +271,6 @@ public class TigerMothPlugin : BaseUnityPlugin
         if (_runActive && (_managedSplits.Count == 0 || _managedSplits[0] == null))
         {
             _runActive = false;
-            _blockGameSplits = false;
             _managedSplits.Clear();
             _currentSplitIndex = -1;
         }
@@ -293,8 +295,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         switch (_currentSplitIndex)
         {
             case 0: // "Double Jump" — complete when ExtraJump collected
-                var extraJump = FindExtraJump();
-                return extraJump != null && (bool)_extraJumpUsedField.GetValue(extraJump);
+                return _extraJump != null && (bool)_extraJumpUsedField.GetValue(_extraJump);
             case 1: // "Foot" — complete when moth enters The Foot area
                 return _footCollider != null && _footCollider.OverlapPoint(_rb.position);
             default: // "End" and beyond — triggered by game's EndRun
@@ -304,7 +305,6 @@ public class TigerMothPlugin : BaseUnityPlugin
 
     private void SetupManagedRun(List<Split> gameSplits)
     {
-        _blockGameSplits = true;
         _runActive = true;
         _currentSplitIndex = 0;
         _managedSplits.Clear();
@@ -354,11 +354,6 @@ public class TigerMothPlugin : BaseUnityPlugin
         }
     }
 
-    private ExtraJump FindExtraJump()
-    {
-        return FindObjectOfType<ExtraJump>();
-    }
-
     private void CacheTmpProperties(Split referenceSplit)
     {
         var timerText = _splitTimerTextField.GetValue(referenceSplit);
@@ -369,8 +364,6 @@ public class TigerMothPlugin : BaseUnityPlugin
             _tmpTextProperty = type.GetProperty("text");
         if (_tmpAutoSizingProperty == null)
             _tmpAutoSizingProperty = type.GetProperty("enableAutoSizing");
-        if (_tmpFontSizeProperty == null)
-            _tmpFontSizeProperty = type.GetProperty("fontSize");
     }
 
     private void DisableTmpAutoSizing(Split split)
@@ -384,12 +377,9 @@ public class TigerMothPlugin : BaseUnityPlugin
     private void SetSplitText(Split split, string text)
     {
         var timerText = _splitTimerTextField.GetValue(split);
-        if (timerText == null)
+        if (timerText == null || _tmpTextProperty == null)
             return;
-        if (_tmpTextProperty == null)
-            _tmpTextProperty = timerText.GetType().GetProperty("text");
-        if (_tmpTextProperty != null)
-            _tmpTextProperty.SetValue(timerText, text, null);
+        _tmpTextProperty.SetValue(timerText, text, null);
     }
 
     // ── Camera zoom ───────────────────────────────────────
@@ -445,8 +435,6 @@ public class TigerMothPlugin : BaseUnityPlugin
         if (_rb == null)
             return;
 
-        var extraJump = FindExtraJump();
-
         _savedState = new SavedState
         {
             rbPosition = _rb.position,
@@ -466,7 +454,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             runActive = _runActive,
             currentSplitIndex = _currentSplitIndex,
             splits = new List<SplitState>(),
-            extraJumpUsed = extraJump != null && (bool)_extraJumpUsedField.GetValue(extraJump),
+            extraJumpUsed = _extraJump != null && (bool)_extraJumpUsedField.GetValue(_extraJump),
             cameraPosition = Singleton<AdvancedCamera>.Instance.transform.position,
         };
 
@@ -564,22 +552,18 @@ public class TigerMothPlugin : BaseUnityPlugin
 
         _currentSplitIndex = _savedState.currentSplitIndex;
         _runActive = _savedState.runActive;
-        _blockGameSplits = _runActive;
 
         // Restore ExtraJump powerup state
-        var extraJump = FindExtraJump();
-        if (extraJump != null)
+        if (_extraJump != null)
         {
-            bool currentlyUsed = (bool)_extraJumpUsedField.GetValue(extraJump);
+            bool currentlyUsed = (bool)_extraJumpUsedField.GetValue(_extraJump);
             if (_savedState.extraJumpUsed && !currentlyUsed)
             {
-                // Powerup was collected at save time — consume it now
-                _extraJumpUsedField.SetValue(extraJump, true);
-                var child = (GameObject)_extraJumpFunctionalChildField.GetValue(extraJump);
+                _extraJumpUsedField.SetValue(_extraJump, true);
+                var child = (GameObject)_extraJumpFunctionalChildField.GetValue(_extraJump);
                 if (child != null)
                     Object.Destroy(child);
             }
-            // If saved as not-used and scene is fresh, nothing to do — already uncollected
         }
 
         // Restore animator state
@@ -590,11 +574,9 @@ public class TigerMothPlugin : BaseUnityPlugin
         // Restore camera position and zoom
         var cam = Singleton<AdvancedCamera>.Instance;
         cam.transform.position = _savedState.cameraPosition;
-        var pureField = typeof(AdvancedCamera).GetField("pureTransform",
-            BindingFlags.Instance | BindingFlags.NonPublic);
-        if (pureField != null)
+        if (_pureTransformField != null)
         {
-            var pure = (Transform)pureField.GetValue(cam);
+            var pure = (Transform)_pureTransformField.GetValue(cam);
             if (pure != null)
                 pure.position = _savedState.cameraPosition;
         }
