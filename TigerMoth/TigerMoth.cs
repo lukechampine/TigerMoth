@@ -9,7 +9,7 @@ using UnityEngine.SceneManagement;
 public class TigerMothPlugin : BaseUnityPlugin
 {
     // ── Split definitions (hardcoded order) ───────────────
-    private static readonly string[] SplitNames = { "Double Jump", "Foot", "End" };
+    private static readonly string[] SplitNames = { "Church", "Double Jump", "Foot", "Tower", "End" };
 
     // ── Harmony: block game's NewSplit after we take over ─
     [HarmonyPatch(typeof(SpeedrunSplits), "NewSplit")]
@@ -109,8 +109,8 @@ public class TigerMothPlugin : BaseUnityPlugin
     private int _currentSplitIndex = -1;
     private bool _runActive;
 
-    // Area trigger — "The Foot" collider for position-based detection
-    private Collider2D _footCollider;
+    // Area triggers — colliders for position-based split detection
+    private Dictionary<string, Collider2D> _areaColliders = new Dictionary<string, Collider2D>();
 
     // Camera zoom
     private float _defaultZoom;
@@ -178,16 +178,23 @@ public class TigerMothPlugin : BaseUnityPlugin
                 _saveSystemClearMethod = typeof(SaveSystem).GetMethod("Clear");
             }
 
-            // Find "The Foot" collider for area-based split trigger
+            // Find area colliders for position-based split triggers
+            var areaNames = new[] { "The Ruined Church", "The Foot", "The Tower" };
             foreach (var lta in FindObjectsOfType<LocationTitleArea>())
             {
-                if (lta.gameObject.name == "The Foot")
+                foreach (var areaName in areaNames)
                 {
-                    _footCollider = lta.GetComponentInChildren<Collider2D>();
-                    if (_footCollider != null)
-                        Logger.LogInfo("TigerMoth: found Foot trigger collider");
-                    else
-                        Logger.LogWarning("TigerMoth: 'The Foot' has no Collider2D");
+                    if (lta.gameObject.name == areaName)
+                    {
+                        var col = lta.GetComponentInChildren<Collider2D>();
+                        if (col != null)
+                        {
+                            _areaColliders[areaName] = col;
+                            Logger.LogInfo("TigerMoth: found trigger collider for " + areaName);
+                        }
+                        else
+                            Logger.LogWarning("TigerMoth: '" + areaName + "' has no Collider2D");
+                    }
                 }
             }
 
@@ -294,13 +301,23 @@ public class TigerMothPlugin : BaseUnityPlugin
     {
         switch (_currentSplitIndex)
         {
-            case 0: // "Double Jump" — complete when ExtraJump collected
+            case 0: // "Church" — moth enters The Ruined Church
+                return AreaOverlap("The Ruined Church");
+            case 1: // "Double Jump" — ExtraJump collected
                 return _extraJump != null && (bool)_extraJumpUsedField.GetValue(_extraJump);
-            case 1: // "Foot" — complete when moth enters The Foot area
-                return _footCollider != null && _footCollider.OverlapPoint(_rb.position);
-            default: // "End" and beyond — triggered by game's EndRun
+            case 2: // "Foot" — moth enters The Foot
+                return AreaOverlap("The Foot");
+            case 3: // "Tower" — moth enters The Tower
+                return AreaOverlap("The Tower");
+            default: // "End" — triggered by game's EndRun
                 return false;
         }
+    }
+
+    private bool AreaOverlap(string areaName)
+    {
+        Collider2D col;
+        return _areaColliders.TryGetValue(areaName, out col) && col.OverlapPoint(_rb.position);
     }
 
     private void SetupManagedRun(List<Split> gameSplits)
@@ -309,27 +326,38 @@ public class TigerMothPlugin : BaseUnityPlugin
         _currentSplitIndex = 0;
         _managedSplits.Clear();
 
-        // First split already created by the game (Double Jump, ticking)
-        _managedSplits.Add(gameSplits[0]);
-
-        // Cache TMP auto-sizing properties from the first split's timerText
-        // so we can disable auto-sizing on created splits (fixes font size mismatch)
+        // Cache TMP properties from the game's split before we destroy it
         CacheTmpProperties(gameSplits[0]);
 
-        // Create remaining splits as inactive with "--" display
-        var prefab = (GameObject)_splitPrefabField.GetValue(Singleton<SpeedrunSplits>.Instance);
-        for (int i = 1; i < SplitNames.Length; i++)
+        // Destroy the game's split — we create all of ours from scratch
+        Object.Destroy(gameSplits[0].gameObject);
+        gameSplits.Clear();
+
+        var splitsInstance = Singleton<SpeedrunSplits>.Instance;
+        var prefab = (GameObject)_splitPrefabField.GetValue(splitsInstance);
+
+        for (int i = 0; i < SplitNames.Length; i++)
         {
-            var split = Object.Instantiate(prefab, Singleton<SpeedrunSplits>.Instance.transform)
+            var split = Object.Instantiate(prefab, splitsInstance.transform)
                 .GetComponent<Split>();
             gameSplits.Add(split);
             _managedSplits.Add(split);
 
             _splitLabelField.SetValue(split, SplitNames[i] + ": ");
-            _splitTickingField.SetValue(split, false);
-            _splitTimeValueField.SetValue(split, 0f);
-            DisableTmpAutoSizing(split);
-            SetSplitText(split, SplitNames[i] + ": --");
+            ConfigureSplitDisplay(split);
+
+            if (i == 0)
+            {
+                // First split starts ticking from 0
+                _splitTickingField.SetValue(split, true);
+                _splitTimeValueField.SetValue(split, 0f);
+            }
+            else
+            {
+                _splitTickingField.SetValue(split, false);
+                _splitTimeValueField.SetValue(split, 0f);
+                SetSplitText(split, SplitNames[i] + ": --");
+            }
         }
 
         Logger.LogInfo("TigerMoth: managed run started (" + SplitNames.Length + " splits)");
@@ -366,12 +394,21 @@ public class TigerMothPlugin : BaseUnityPlugin
             _tmpAutoSizingProperty = type.GetProperty("enableAutoSizing");
     }
 
-    private void DisableTmpAutoSizing(Split split)
+    private void ConfigureSplitDisplay(Split split)
     {
+        // Disable TMP auto-sizing so font size is consistent across splits
         var timerText = _splitTimerTextField.GetValue(split);
-        if (timerText == null || _tmpAutoSizingProperty == null)
-            return;
-        _tmpAutoSizingProperty.SetValue(timerText, false, null);
+        if (timerText != null && _tmpAutoSizingProperty != null)
+            _tmpAutoSizingProperty.SetValue(timerText, false, null);
+
+        // Widen the split's root RectTransform so longer labels fit
+        var rt = split.GetComponent<RectTransform>();
+        if (rt != null)
+        {
+            var size = rt.sizeDelta;
+            size.x += 40f;
+            rt.sizeDelta = size;
+        }
     }
 
     private void SetSplitText(Split split, string text)
@@ -529,7 +566,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             _splitLabelField.SetValue(newSplit, saved.label);
             _splitTimeValueField.SetValue(newSplit, saved.timeValue);
             _splitTickingField.SetValue(newSplit, saved.ticking);
-            DisableTmpAutoSizing(newSplit);
+            ConfigureSplitDisplay(newSplit);
 
             if (i < _savedState.currentSplitIndex)
             {
