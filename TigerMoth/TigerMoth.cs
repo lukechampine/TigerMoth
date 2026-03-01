@@ -45,8 +45,12 @@ public class TigerMothPlugin : BaseUnityPlugin
         public List<SplitState> splits;
 
         public bool extraJumpUsed;
+        public float cameraTargetSize;
 
         public Vector3 cameraPosition;
+
+        public Vector3 spiderPosition;
+        public bool spiderCanFollow;
 
         public int animStateHash;
         public float animNormalizedTime;
@@ -88,6 +92,10 @@ public class TigerMothPlugin : BaseUnityPlugin
     // Reflection — ExtraJump
     private FieldInfo _extraJumpUsedField;
     private FieldInfo _extraJumpFunctionalChildField;
+    private FieldInfo _extraJumpCameraSizeField;
+
+    // Reflection — SpiderBrain
+    private FieldInfo _spiderCanFollowField;
 
     // Reflection — Animator
     private FieldInfo _animatorField;
@@ -166,7 +174,10 @@ public class TigerMothPlugin : BaseUnityPlugin
 
             _extraJumpUsedField = typeof(ExtraJump).GetField("used", flags);
             _extraJumpFunctionalChildField = typeof(ExtraJump).GetField("functionalChild", flags);
+            _extraJumpCameraSizeField = typeof(ExtraJump).GetField("cameraSizeIncrement", flags);
             _extraJump = FindObjectOfType<ExtraJump>();
+
+            _spiderCanFollowField = typeof(SpiderBrain).GetField("canFollowPlayer", flags);
 
             _maskField = typeof(ScreenTransition).GetField("mask", flags | BindingFlags.Public);
             _pureTransformField = typeof(AdvancedCamera).GetField("pureTransform", flags);
@@ -492,7 +503,10 @@ public class TigerMothPlugin : BaseUnityPlugin
             currentSplitIndex = _currentSplitIndex,
             splits = new List<SplitState>(),
             extraJumpUsed = _extraJump != null && (bool)_extraJumpUsedField.GetValue(_extraJump),
+            cameraTargetSize = Singleton<AdvancedCamera>.Instance.targetSize,
             cameraPosition = Singleton<AdvancedCamera>.Instance.transform.position,
+            spiderPosition = Singleton<SpiderBrain>.Instance.transform.position,
+            spiderCanFollow = (bool)_spiderCanFollowField.GetValue(Singleton<SpiderBrain>.Instance),
         };
 
         // Animator state
@@ -600,7 +614,18 @@ public class TigerMothPlugin : BaseUnityPlugin
                 var child = (GameObject)_extraJumpFunctionalChildField.GetValue(_extraJump);
                 if (child != null)
                     Object.Destroy(child);
+                // Apply the camera size bump that ExtraJump.Load normally does
+                Singleton<AdvancedCamera>.Instance.targetSize +=
+                    (float)_extraJumpCameraSizeField.GetValue(_extraJump);
             }
+        }
+
+        // Restore spider state
+        var spider = Singleton<SpiderBrain>.Instance;
+        if (spider != null)
+        {
+            spider.transform.position = _savedState.spiderPosition;
+            _spiderCanFollowField.SetValue(spider, _savedState.spiderCanFollow);
         }
 
         // Restore animator state
@@ -610,6 +635,7 @@ public class TigerMothPlugin : BaseUnityPlugin
 
         // Restore camera position and zoom
         var cam = Singleton<AdvancedCamera>.Instance;
+        cam.targetSize = _savedState.cameraTargetSize;
         cam.transform.position = _savedState.cameraPosition;
         if (_pureTransformField != null)
         {
