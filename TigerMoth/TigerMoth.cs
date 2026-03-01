@@ -733,10 +733,11 @@ public class TigerMothPlugin : BaseUnityPlugin
         if (animator != null && _savedState.animStateHash != 0)
             animator.Play(_savedState.animStateHash, 0, _savedState.animNormalizedTime);
 
-        // Restore camera position and zoom
+        // Restore camera position and zoom (layer user zoom on top of saved zoom)
         var cam = Singleton<AdvancedCamera>.Instance;
-        cam.targetSize = _savedState.cameraTargetSize;
-        Camera.main.orthographicSize = _savedState.cameraTargetSize;
+        float zoom = _savedState.cameraTargetSize + _zoomSteps * 2f;
+        cam.targetSize = zoom;
+        Camera.main.orthographicSize = zoom;
         cam.transform.position = _savedState.cameraPosition;
         if (_pureTransformField != null)
         {
