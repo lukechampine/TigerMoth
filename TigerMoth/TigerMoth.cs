@@ -11,27 +11,27 @@ public class TigerMothPlugin : BaseUnityPlugin
     // ── Split definitions (hardcoded order) ───────────────
     private static readonly string[] SplitNames = { "Church", "Double Jump", "Tower", "End" };
 
+    private static TigerMothPlugin _instance;
+
     // ── Harmony: block game's NewSplit after we take over ─
     [HarmonyPatch(typeof(SpeedrunSplits), "NewSplit")]
     private class PatchNewSplit
     {
         static bool Prefix(bool first)
         {
-            var plugin = FindObjectOfType<TigerMothPlugin>();
-            return plugin == null || !plugin._runActive || first;
+            return _instance == null || !_instance._runActive || first;
         }
     }
+
+    private static readonly KeyCode[] CpKeys =
+        { KeyCode.Alpha1, KeyCode.Alpha2, KeyCode.Alpha3, KeyCode.Alpha4 };
 
     // ── Saved state ───────────────────────────────────────
     private class SavedState
     {
         public Vector2 rbPosition;
         public Vector2 rbVelocity;
-        public float rbAngularVelocity;
-        public float transformZ;
-        public Vector3 eulerAngles;
         public int jumps;
-        public int maxJumps;
         public float chargingTime;
         public int facingDirection;
         public bool jumpCanceled;
@@ -39,11 +39,8 @@ public class TigerMothPlugin : BaseUnityPlugin
         public bool queuedJump;
         public Vector2 velocityBeforeHitstop;
 
-        public bool splitsRunning;
-        public bool runActive;
         public int currentSplitIndex;
         public float[] splitTimeValues;
-        public bool[] splitTicking;
 
         public bool extraJumpUsed;
         public float cameraTargetSize;
@@ -87,7 +84,6 @@ public class TigerMothPlugin : BaseUnityPlugin
     // Reflection — ExtraJump
     private FieldInfo _extraJumpUsedField;
     private FieldInfo _extraJumpFunctionalChildField;
-    private FieldInfo _extraJumpCameraSizeField;
 
     // Reflection — SpiderBrain
     private FieldInfo _spiderCanFollowField;
@@ -127,6 +123,7 @@ public class TigerMothPlugin : BaseUnityPlugin
 
     void Awake()
     {
+        _instance = this;
         new Harmony("com.speedrun.tigermoth").PatchAll();
         _checkpoints = CreateCheckpoints();
         Logger.LogInfo("TigerMoth loaded");
@@ -170,7 +167,6 @@ public class TigerMothPlugin : BaseUnityPlugin
 
             _extraJumpUsedField = typeof(ExtraJump).GetField("used", flags);
             _extraJumpFunctionalChildField = typeof(ExtraJump).GetField("functionalChild", flags);
-            _extraJumpCameraSizeField = typeof(ExtraJump).GetField("cameraSizeIncrement", flags);
             _extraJump = FindObjectOfType<ExtraJump>();
 
             _spiderCanFollowField = typeof(SpiderBrain).GetField("canFollowPlayer", flags);
@@ -238,10 +234,9 @@ public class TigerMothPlugin : BaseUnityPlugin
         }
 
         // Checkpoints: 1,2,3,4 → load hardcoded checkpoints
-        KeyCode[] cpKeys = { KeyCode.Alpha1, KeyCode.Alpha2, KeyCode.Alpha3, KeyCode.Alpha4 };
         for (int i = 0; i < 4; i++)
         {
-            if (Input.GetKeyDown(cpKeys[i]))
+            if (Input.GetKeyDown(CpKeys[i]))
             {
                 _savedState = _checkpoints[i];
                 ReloadAndRestore();
@@ -454,30 +449,21 @@ public class TigerMothPlugin : BaseUnityPlugin
             new SavedState
             {
                 rbPosition = new Vector2(-22.591f, 7.028f),
-                eulerAngles = Vector3.zero,
-                jumps = 1, maxJumps = 1,
+                jumps = 1,
                 facingDirection = 1,
-                splitsRunning = true, runActive = true,
                 currentSplitIndex = 0,
-                splitTimeValues = new float[] { 0f, 0f, 0f, 0f },
-                splitTicking = new bool[] { true, false, false, false },
                 cameraTargetSize = 5.2f,
                 cameraPosition = new Vector3(-21.63f, 10.325f, -10f),
                 spiderPosition = new Vector3(-26.567f, 67.769f, -0.079f),
-                spiderCanFollow = false,
                 animStateHash = 618468143,
             },
             // 2: After Double Jump (entering Tower)
             new SavedState
             {
                 rbPosition = new Vector2(-0.437f, 34.58f),
-                eulerAngles = new Vector3(0f, 180f, 0f),
-                jumps = 2, maxJumps = 2,
+                jumps = 2,
                 facingDirection = -1,
-                splitsRunning = true, runActive = true,
                 currentSplitIndex = 2,
-                splitTimeValues = new float[] { 0f, 0f, 0f, 0f },
-                splitTicking = new bool[] { false, false, true, false },
                 extraJumpUsed = true,
                 cameraTargetSize = 6.2f,
                 cameraPosition = new Vector3(-1.426f, 37.846f, -10f),
@@ -489,13 +475,9 @@ public class TigerMothPlugin : BaseUnityPlugin
             new SavedState
             {
                 rbPosition = new Vector2(-32.829f, 71.38f),
-                eulerAngles = new Vector3(0f, 180f, 0f),
-                jumps = 2, maxJumps = 2,
+                jumps = 2,
                 facingDirection = -1,
-                splitsRunning = true, runActive = true,
                 currentSplitIndex = 2,
-                splitTimeValues = new float[] { 0f, 0f, 0f, 0f },
-                splitTicking = new bool[] { false, false, true, false },
                 extraJumpUsed = true,
                 cameraTargetSize = 6.2f,
                 cameraPosition = new Vector3(-33.819f, 74.629f, -10f),
@@ -507,13 +489,9 @@ public class TigerMothPlugin : BaseUnityPlugin
             new SavedState
             {
                 rbPosition = new Vector2(-21.371f, 135.431f),
-                eulerAngles = new Vector3(0f, 180f, 0f),
-                jumps = 2, maxJumps = 2,
+                jumps = 2,
                 facingDirection = -1,
-                splitsRunning = true, runActive = true,
                 currentSplitIndex = 3,
-                splitTimeValues = new float[] { 0f, 0f, 0f, 0f },
-                splitTicking = new bool[] { false, false, false, true },
                 extraJumpUsed = true,
                 cameraTargetSize = 7.819f,
                 cameraPosition = new Vector3(-22.329f, 138.661f, -10f),
@@ -570,22 +548,15 @@ public class TigerMothPlugin : BaseUnityPlugin
         {
             rbPosition = _rb.position,
             rbVelocity = _rb.velocity,
-            rbAngularVelocity = _rb.angularVelocity,
-            transformZ = _moth.transform.position.z,
-            eulerAngles = _moth.transform.eulerAngles,
             jumps = (int)_jumpsField.GetValue(_moth),
-            maxJumps = (int)_maxJumpsField.GetValue(_moth),
             chargingTime = (float)_chargingTimeField.GetValue(_moth),
             facingDirection = (int)_facingDirectionField.GetValue(_moth),
             jumpCanceled = (bool)_jumpCanceledField.GetValue(_moth),
             hitstopActive = (bool)_hitstopField.GetValue(_moth),
             queuedJump = (bool)_queuedJumpField.GetValue(_moth),
             velocityBeforeHitstop = (Vector2)_velocityBeforeHitstopField.GetValue(_moth),
-            splitsRunning = (bool)_splitsRunningField.GetValue(Singleton<SpeedrunSplits>.Instance),
-            runActive = _runActive,
             currentSplitIndex = _currentSplitIndex,
             splitTimeValues = new float[_managedSplits.Count],
-            splitTicking = new bool[_managedSplits.Count],
             extraJumpUsed = _extraJump != null && (bool)_extraJumpUsedField.GetValue(_extraJump),
             cameraTargetSize = Singleton<AdvancedCamera>.Instance.targetSize,
             cameraPosition = Singleton<AdvancedCamera>.Instance.transform.position,
@@ -603,10 +574,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         }
 
         for (int i = 0; i < _managedSplits.Count; i++)
-        {
             _savedState.splitTimeValues[i] = (float)_splitTimeValueField.GetValue(_managedSplits[i]);
-            _savedState.splitTicking[i] = (bool)_splitTickingField.GetValue(_managedSplits[i]);
-        }
 
         Logger.LogInfo(string.Format("TigerMoth saved state at ({0:F2}, {1:F2}) split={2}",
             _savedState.rbPosition.x, _savedState.rbPosition.y, _currentSplitIndex));
@@ -620,18 +588,15 @@ public class TigerMothPlugin : BaseUnityPlugin
         // Physics body
         _rb.position = _savedState.rbPosition;
         _rb.velocity = _savedState.rbVelocity;
-        _rb.angularVelocity = _savedState.rbAngularVelocity;
+        _rb.angularVelocity = 0f;
 
-        // Transform (z position and rotation)
-        _moth.transform.position = new Vector3(
-            _savedState.rbPosition.x,
-            _savedState.rbPosition.y,
-            _savedState.transformZ);
-        _moth.transform.eulerAngles = _savedState.eulerAngles;
+        // Transform — z is always 0; rotation derived from facingDirection
+        _moth.transform.position = new Vector3(_savedState.rbPosition.x, _savedState.rbPosition.y, 0f);
+        _moth.transform.eulerAngles = new Vector3(0f, _savedState.facingDirection == 1 ? 0f : 180f, 0f);
 
         // MothController state
         _jumpsField.SetValue(_moth, _savedState.jumps);
-        _maxJumpsField.SetValue(_moth, _savedState.maxJumps);
+        _maxJumpsField.SetValue(_moth, _savedState.extraJumpUsed ? 2 : 1);
         _chargingTimeField.SetValue(_moth, _savedState.chargingTime);
         _facingDirectionField.SetValue(_moth, _savedState.facingDirection);
         _jumpCanceledField.SetValue(_moth, _savedState.jumpCanceled);
@@ -641,7 +606,7 @@ public class TigerMothPlugin : BaseUnityPlugin
 
         // Restore splits — destroy the ones GameManager.Awake created, rebuild ours
         var splitsInstance = Singleton<SpeedrunSplits>.Instance;
-        _splitsRunningField.SetValue(splitsInstance, _savedState.splitsRunning);
+        _splitsRunningField.SetValue(splitsInstance, true);
         var splitsList = (List<Split>)_splitsListField.GetValue(splitsInstance);
         var splitPrefab = (GameObject)_splitPrefabField.GetValue(splitsInstance);
 
@@ -656,9 +621,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             float timeValue = (_savedState.splitTimeValues != null && i < _savedState.splitTimeValues.Length)
                 ? _savedState.splitTimeValues[i]
                 : 0f;
-            bool ticking = (_savedState.splitTicking != null && i < _savedState.splitTicking.Length)
-                ? _savedState.splitTicking[i]
-                : (i == _savedState.currentSplitIndex);
+            bool ticking = (i == _savedState.currentSplitIndex);
 
             var newSplit = Object.Instantiate(splitPrefab, splitsInstance.transform).GetComponent<Split>();
             splitsList.Add(newSplit);
@@ -686,7 +649,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         }
 
         _currentSplitIndex = _savedState.currentSplitIndex;
-        _runActive = _savedState.runActive;
+        _runActive = _savedState.currentSplitIndex >= 0;
 
         // Restore ExtraJump powerup state (just the gameplay effect, not camera —
         // camera zoom is restored separately from savedState.cameraTargetSize)
