@@ -9,7 +9,7 @@ using UnityEngine.SceneManagement;
 public class TigerMothPlugin : BaseUnityPlugin
 {
     // ── Split definitions (hardcoded order) ───────────────
-    private static readonly string[] SplitNames = { "Church", "Double Jump", "Foot", "Tower", "End" };
+    private static readonly string[] SplitNames = { "Church", "Double Jump", "Tower", "End" };
 
     // ── Harmony: block game's NewSplit after we take over ─
     [HarmonyPatch(typeof(SpeedrunSplits), "NewSplit")]
@@ -190,7 +190,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             }
 
             // Find area colliders for position-based split triggers
-            var areaNames = new[] { "The Ruined Church", "The Foot", "The Tower" };
+            var areaNames = new[] { "The Ruined Church", "The Tower" };
             foreach (var lta in FindObjectsOfType<LocationTitleArea>())
             {
                 foreach (var areaName in areaNames)
@@ -316,9 +316,7 @@ public class TigerMothPlugin : BaseUnityPlugin
                 return AreaOverlap("The Ruined Church");
             case 1: // "Double Jump" — ExtraJump collected
                 return _extraJump != null && (bool)_extraJumpUsedField.GetValue(_extraJump);
-            case 2: // "Foot" — moth enters The Foot
-                return AreaOverlap("The Foot");
-            case 3: // "Tower" — moth enters The Tower
+            case 2: // "Tower" — moth enters The Tower
                 return AreaOverlap("The Tower");
             default: // "End" — triggered by game's EndRun
                 return false;
