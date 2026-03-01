@@ -42,10 +42,8 @@ public class TigerMothPlugin : BaseUnityPlugin
         public bool splitsRunning;
         public bool runActive;
         public int currentSplitIndex;
-        // Split data as flat arrays (JsonUtility doesn't serialize List<custom class> reliably)
         public float[] splitTimeValues;
         public bool[] splitTicking;
-        public string[] splitLabels;
 
         public bool extraJumpUsed;
         public float cameraTargetSize;
@@ -448,9 +446,6 @@ public class TigerMothPlugin : BaseUnityPlugin
 
     // ── Hardcoded checkpoints ─────────────────────────────
 
-    private static readonly string[] CheckpointSplitLabels =
-        { "Church: ", "Double Jump: ", "Tower: ", "End: " };
-
     private static SavedState[] CreateCheckpoints()
     {
         return new[]
@@ -466,7 +461,6 @@ public class TigerMothPlugin : BaseUnityPlugin
                 currentSplitIndex = 0,
                 splitTimeValues = new float[] { 0f, 0f, 0f, 0f },
                 splitTicking = new bool[] { true, false, false, false },
-                splitLabels = CheckpointSplitLabels,
                 cameraTargetSize = 5.2f,
                 cameraPosition = new Vector3(-21.63f, 10.325f, -10f),
                 spiderPosition = new Vector3(-26.567f, 67.769f, -0.079f),
@@ -484,7 +478,6 @@ public class TigerMothPlugin : BaseUnityPlugin
                 currentSplitIndex = 2,
                 splitTimeValues = new float[] { 0f, 0f, 0f, 0f },
                 splitTicking = new bool[] { false, false, true, false },
-                splitLabels = CheckpointSplitLabels,
                 extraJumpUsed = true,
                 cameraTargetSize = 6.2f,
                 cameraPosition = new Vector3(-1.426f, 37.846f, -10f),
@@ -503,7 +496,6 @@ public class TigerMothPlugin : BaseUnityPlugin
                 currentSplitIndex = 2,
                 splitTimeValues = new float[] { 0f, 0f, 0f, 0f },
                 splitTicking = new bool[] { false, false, true, false },
-                splitLabels = CheckpointSplitLabels,
                 extraJumpUsed = true,
                 cameraTargetSize = 6.2f,
                 cameraPosition = new Vector3(-33.819f, 74.629f, -10f),
@@ -522,7 +514,6 @@ public class TigerMothPlugin : BaseUnityPlugin
                 currentSplitIndex = 3,
                 splitTimeValues = new float[] { 0f, 0f, 0f, 0f },
                 splitTicking = new bool[] { false, false, false, true },
-                splitLabels = CheckpointSplitLabels,
                 extraJumpUsed = true,
                 cameraTargetSize = 7.819f,
                 cameraPosition = new Vector3(-22.329f, 138.661f, -10f),
@@ -595,7 +586,6 @@ public class TigerMothPlugin : BaseUnityPlugin
             currentSplitIndex = _currentSplitIndex,
             splitTimeValues = new float[_managedSplits.Count],
             splitTicking = new bool[_managedSplits.Count],
-            splitLabels = new string[_managedSplits.Count],
             extraJumpUsed = _extraJump != null && (bool)_extraJumpUsedField.GetValue(_extraJump),
             cameraTargetSize = Singleton<AdvancedCamera>.Instance.targetSize,
             cameraPosition = Singleton<AdvancedCamera>.Instance.transform.position,
@@ -616,7 +606,6 @@ public class TigerMothPlugin : BaseUnityPlugin
         {
             _savedState.splitTimeValues[i] = (float)_splitTimeValueField.GetValue(_managedSplits[i]);
             _savedState.splitTicking[i] = (bool)_splitTickingField.GetValue(_managedSplits[i]);
-            _savedState.splitLabels[i] = (string)_splitLabelField.GetValue(_managedSplits[i]);
         }
 
         Logger.LogInfo(string.Format("TigerMoth saved state at ({0:F2}, {1:F2}) split={2}",
@@ -661,16 +650,9 @@ public class TigerMothPlugin : BaseUnityPlugin
         splitsList.Clear();
         _managedSplits.Clear();
 
-        // Determine split count: use saved data if available, otherwise fall back to SplitNames
-        int splitCount = (_savedState.splitLabels != null && _savedState.splitLabels.Length > 0)
-            ? _savedState.splitLabels.Length
-            : SplitNames.Length;
-
-        for (int i = 0; i < splitCount; i++)
+        for (int i = 0; i < SplitNames.Length; i++)
         {
-            string label = (_savedState.splitLabels != null && i < _savedState.splitLabels.Length)
-                ? _savedState.splitLabels[i]
-                : SplitNames[i] + ": ";
+            string label = SplitNames[i] + ": ";
             float timeValue = (_savedState.splitTimeValues != null && i < _savedState.splitTimeValues.Length)
                 ? _savedState.splitTimeValues[i]
                 : 0f;
