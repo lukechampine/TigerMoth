@@ -1,15 +1,17 @@
 using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
 using System.Reflection;
 using BepInEx;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-[BepInPlugin("com.speedrun.tigermoth", "TigerMoth", "1.2.0")]
+[BepInPlugin("com.speedrun.tigermoth", "TigerMoth", "1.4.0")]
 public class TigerMothPlugin : BaseUnityPlugin
 {
     // ── Split definitions (hardcoded order) ───────────────
-    private static readonly string[] SplitNames = { "Church", "Double Jump", "Tower", "End" };
+    private static readonly string[] SplitNames = { "Church", "Gift", "Tower", "End" };
 
     private static TigerMothPlugin _instance;
 
@@ -20,6 +22,17 @@ public class TigerMothPlugin : BaseUnityPlugin
         static bool Prefix(bool first)
         {
             return _instance == null || !_instance._runActive || first;
+        }
+    }
+
+    // ── Harmony: capture EndRun for final split ───────────
+    [HarmonyPatch(typeof(SpeedrunSplits), "EndRun")]
+    private class PatchEndRun
+    {
+        static void Postfix()
+        {
+            if (_instance != null && _instance._runActive)
+                _instance.OnEndRun();
         }
     }
 
@@ -79,7 +92,7 @@ public class TigerMothPlugin : BaseUnityPlugin
     private FieldInfo _splitTimeValueField;
     private FieldInfo _splitLabelField;
     private FieldInfo _splitTimerTextField;
-    private PropertyInfo _tmpTextProperty;
+    private FieldInfo _timerBackgroundField;
 
     // Reflection — ExtraJump
     private FieldInfo _extraJumpUsedField;
@@ -97,9 +110,6 @@ public class TigerMothPlugin : BaseUnityPlugin
     private MethodInfo _saveSystemClearMethod;
     private object _saveSystemGameBucket;
 
-    // TMP auto-sizing — disable on created splits so font size matches
-    private PropertyInfo _tmpAutoSizingProperty;
-
     // Cached scene objects
     private ExtraJump _extraJump;
 
@@ -115,9 +125,26 @@ public class TigerMothPlugin : BaseUnityPlugin
     private float _defaultZoom;
     private int _zoomSteps;
 
+    // Personal best / gold tracking
+    private float[] _pbTotalTimes;
+    private float[] _bestSegments;
+    private float[] _runTotals;
+
+    // Display data (read by OnGUI)
+    private float[] _displaySegTimes;
+    private float[] _displayTotalTimes;
+    private bool[] _splitLocked;
+    private bool[] _splitIsGold;
+
     // GUI
     private GUIStyle _labelStyle;
     private GUIStyle _headerStyle;
+    private GUIStyle _splitNameStyle;
+    private GUIStyle _splitTimeStyle;
+    private Texture2D _splitBgTex;
+    private GUIStyle _splitBgStyle;
+    private Texture2D _splitActiveTex;
+    private GUIStyle _splitActiveStyle;
 
     // ── Lifecycle ─────────────────────────────────────────
 
@@ -126,6 +153,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         _instance = this;
         new Harmony("com.speedrun.tigermoth").PatchAll();
         _checkpoints = CreateCheckpoints();
+        LoadPB();
         Logger.LogInfo("TigerMoth loaded");
     }
 
@@ -164,6 +192,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             _splitTimeValueField = typeof(Split).GetField("timeValue", flags);
             _splitLabelField = typeof(Split).GetField("label", flags);
             _splitTimerTextField = typeof(Split).GetField("timerText", flags);
+            _timerBackgroundField = typeof(Split).GetField("timerBackground", flags);
 
             _extraJumpUsedField = typeof(ExtraJump).GetField("used", flags);
             _extraJumpFunctionalChildField = typeof(ExtraJump).GetField("functionalChild", flags);
@@ -260,11 +289,6 @@ public class TigerMothPlugin : BaseUnityPlugin
 
     private void ReloadAndRestore()
     {
-        // Mirror what the game's Reset (R key) does: cancel all tweens,
-        // clear save data, reload the scene. Our plugin survives the reload
-        // (BepInEx uses DontDestroyOnLoad) and applies saved state on the
-        // fresh scene, avoiding all the manual cleanup of cutscene effects,
-        // screen transitions, animation states, orbs, etc.
         _pendingLoad = true;
         _moth = null;
         _rb = null;
@@ -316,7 +340,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         {
             case 0: // "Church" — moth enters The Ruined Church
                 return AreaOverlap("The Ruined Church");
-            case 1: // "Double Jump" — ExtraJump collected
+            case 1: // "Gift" — ExtraJump collected
                 return _extraJump != null && (bool)_extraJumpUsedField.GetValue(_extraJump);
             case 2: // "Tower" — moth enters The Tower
                 return AreaOverlap("The Tower");
@@ -336,9 +360,11 @@ public class TigerMothPlugin : BaseUnityPlugin
         _runActive = true;
         _currentSplitIndex = 0;
         _managedSplits.Clear();
-
-        // Cache TMP properties from the game's split before we destroy it
-        CacheTmpProperties(gameSplits[0]);
+        _runTotals = new float[SplitNames.Length];
+        _displaySegTimes = new float[SplitNames.Length];
+        _displayTotalTimes = new float[SplitNames.Length];
+        _splitLocked = new bool[SplitNames.Length];
+        _splitIsGold = new bool[SplitNames.Length];
 
         // Destroy the game's split — we create all of ours from scratch
         Object.Destroy(gameSplits[0].gameObject);
@@ -354,12 +380,11 @@ public class TigerMothPlugin : BaseUnityPlugin
             gameSplits.Add(split);
             _managedSplits.Add(split);
 
-            _splitLabelField.SetValue(split, SplitNames[i] + ": ");
-            ConfigureSplitDisplay(split);
+            _splitLabelField.SetValue(split, SplitNames[i]);
+            HideSplitVisuals(split);
 
             if (i == 0)
             {
-                // First split starts ticking from 0
                 _splitTickingField.SetValue(split, true);
                 _splitTimeValueField.SetValue(split, 0f);
             }
@@ -367,11 +392,26 @@ public class TigerMothPlugin : BaseUnityPlugin
             {
                 _splitTickingField.SetValue(split, false);
                 _splitTimeValueField.SetValue(split, 0f);
-                SetSplitText(split, SplitNames[i] + ": --");
             }
         }
 
         Logger.LogInfo("TigerMoth: managed run started (" + SplitNames.Length + " splits)");
+    }
+
+    private void HideSplitVisuals(Split split)
+    {
+        // Disable the TMP text and background Image renderers.
+        // The Split script still runs and tracks timeValue — we just draw
+        // our own table in OnGUI instead.
+        var text = _splitTimerTextField != null
+            ? _splitTimerTextField.GetValue(split) as Behaviour : null;
+        if (text != null)
+            text.enabled = false;
+
+        var bg = _timerBackgroundField != null
+            ? _timerBackgroundField.GetValue(split) as Behaviour : null;
+        if (bg != null)
+            bg.enabled = false;
     }
 
     private void AdvanceSplit()
@@ -379,55 +419,160 @@ public class TigerMothPlugin : BaseUnityPlugin
         if (_currentSplitIndex >= _managedSplits.Count)
             return;
 
-        float prevTime = _managedSplits[_currentSplitIndex].Lock();
-        Logger.LogInfo(string.Format("TigerMoth: split '{0}' locked at {1:F2}",
-            SplitNames[_currentSplitIndex], prevTime));
+        float totalTime = _managedSplits[_currentSplitIndex].Lock();
+        float segmentTime = _currentSplitIndex == 0
+            ? totalTime
+            : totalTime - _runTotals[_currentSplitIndex - 1];
+        _runTotals[_currentSplitIndex] = totalTime;
+
+        bool isGold = UpdateBestSegment(_currentSplitIndex, segmentTime);
+
+        _displaySegTimes[_currentSplitIndex] = segmentTime;
+        _displayTotalTimes[_currentSplitIndex] = totalTime;
+        _splitLocked[_currentSplitIndex] = true;
+        _splitIsGold[_currentSplitIndex] = isGold;
+
+        SavePB();
+
+        Logger.LogInfo(string.Format("TigerMoth: split '{0}' seg={1} total={2}",
+            SplitNames[_currentSplitIndex], FormatTime(segmentTime), FormatTime(totalTime)));
 
         _currentSplitIndex++;
 
         if (_currentSplitIndex < _managedSplits.Count)
         {
             var next = _managedSplits[_currentSplitIndex];
-            _splitTimeValueField.SetValue(next, prevTime);
+            _splitTimeValueField.SetValue(next, totalTime);
             _splitTickingField.SetValue(next, true);
         }
     }
 
-    private void CacheTmpProperties(Split referenceSplit)
+    private void OnEndRun()
     {
-        var timerText = _splitTimerTextField.GetValue(referenceSplit);
-        if (timerText == null)
+        int lastIdx = SplitNames.Length - 1;
+        if (_currentSplitIndex != lastIdx)
             return;
-        var type = timerText.GetType();
-        if (_tmpTextProperty == null)
-            _tmpTextProperty = type.GetProperty("text");
-        if (_tmpAutoSizingProperty == null)
-            _tmpAutoSizingProperty = type.GetProperty("enableAutoSizing");
+        if (lastIdx >= _managedSplits.Count || _managedSplits[lastIdx] == null)
+            return;
+
+        // Lock() was already called by the game's EndRun
+        float totalTime = (float)_splitTimeValueField.GetValue(_managedSplits[lastIdx]);
+        float segmentTime = lastIdx == 0
+            ? totalTime
+            : totalTime - _runTotals[lastIdx - 1];
+        _runTotals[lastIdx] = totalTime;
+
+        bool isGold = UpdateBestSegment(lastIdx, segmentTime);
+
+        _displaySegTimes[lastIdx] = segmentTime;
+        _displayTotalTimes[lastIdx] = totalTime;
+        _splitLocked[lastIdx] = true;
+        _splitIsGold[lastIdx] = isGold;
+
+        // Check for PB — all splits must have been hit in this run
+        bool complete = true;
+        for (int i = 0; i < SplitNames.Length; i++)
+        {
+            if (_runTotals[i] <= 0) { complete = false; break; }
+        }
+        if (complete && (_pbTotalTimes == null || totalTime < _pbTotalTimes[lastIdx]))
+        {
+            _pbTotalTimes = (float[])_runTotals.Clone();
+            Logger.LogInfo("TigerMoth: New PB! " + FormatTime(totalTime));
+        }
+
+        SavePB();
+        _currentSplitIndex = SplitNames.Length;
     }
 
-    private void ConfigureSplitDisplay(Split split)
-    {
-        // Disable TMP auto-sizing so font size is consistent across splits
-        var timerText = _splitTimerTextField.GetValue(split);
-        if (timerText != null && _tmpAutoSizingProperty != null)
-            _tmpAutoSizingProperty.SetValue(timerText, false, null);
+    // ── Formatting helpers ────────────────────────────────
 
-        // Widen the split's root RectTransform so longer labels fit
-        var rt = split.GetComponent<RectTransform>();
-        if (rt != null)
+    private static string FormatTime(float t)
+    {
+        return t.ToString("F2");
+    }
+
+    // ── PB persistence ────────────────────────────────────
+
+    private bool UpdateBestSegment(int idx, float segmentTime)
+    {
+        if (_bestSegments == null)
+            _bestSegments = new float[SplitNames.Length];
+        if (idx >= _bestSegments.Length)
+            return false;
+
+        if (_bestSegments[idx] <= 0 || segmentTime < _bestSegments[idx])
         {
-            var size = rt.sizeDelta;
-            size.x += 40f;
-            rt.sizeDelta = size;
+            _bestSegments[idx] = segmentTime;
+            return true;
+        }
+        return false;
+    }
+
+    private void LoadPB()
+    {
+        string path = Path.Combine(BepInEx.Paths.ConfigPath, "TigerMoth_pb.txt");
+        if (!File.Exists(path))
+            return;
+
+        try
+        {
+            foreach (string line in File.ReadAllLines(path))
+            {
+                if (line.StartsWith("pb:"))
+                    _pbTotalTimes = ParseFloats(line.Substring(3));
+                else if (line.StartsWith("gold:"))
+                    _bestSegments = ParseFloats(line.Substring(5));
+            }
+            if (_pbTotalTimes != null)
+                Logger.LogInfo("TigerMoth: PB loaded — " + FormatTime(_pbTotalTimes[_pbTotalTimes.Length - 1]));
+            if (_bestSegments != null)
+            {
+                float sum = 0;
+                for (int i = 0; i < _bestSegments.Length; i++) sum += _bestSegments[i];
+                Logger.LogInfo("TigerMoth: Sum of best segments — " + FormatTime(sum));
+            }
+        }
+        catch (System.Exception e)
+        {
+            Logger.LogError("TigerMoth: failed to load PB: " + e.Message);
         }
     }
 
-    private void SetSplitText(Split split, string text)
+    private void SavePB()
     {
-        var timerText = _splitTimerTextField.GetValue(split);
-        if (timerText == null || _tmpTextProperty == null)
-            return;
-        _tmpTextProperty.SetValue(timerText, text, null);
+        string path = Path.Combine(BepInEx.Paths.ConfigPath, "TigerMoth_pb.txt");
+        try
+        {
+            var lines = new List<string>();
+            if (_pbTotalTimes != null)
+                lines.Add("pb:" + JoinFloats(_pbTotalTimes));
+            if (_bestSegments != null)
+                lines.Add("gold:" + JoinFloats(_bestSegments));
+            if (lines.Count > 0)
+                File.WriteAllLines(path, lines.ToArray());
+        }
+        catch (System.Exception e)
+        {
+            Logger.LogError("TigerMoth: failed to save PB: " + e.Message);
+        }
+    }
+
+    private static float[] ParseFloats(string csv)
+    {
+        string[] parts = csv.Split(',');
+        float[] result = new float[parts.Length];
+        for (int i = 0; i < parts.Length; i++)
+            float.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out result[i]);
+        return result;
+    }
+
+    private static string JoinFloats(float[] values)
+    {
+        var parts = new string[values.Length];
+        for (int i = 0; i < values.Length; i++)
+            parts[i] = values[i].ToString("F4", CultureInfo.InvariantCulture);
+        return string.Join(",", parts);
     }
 
     // ── Camera zoom ───────────────────────────────────────
@@ -457,7 +602,7 @@ public class TigerMothPlugin : BaseUnityPlugin
                 spiderPosition = new Vector3(-26.567f, 67.769f, -0.079f),
                 animStateHash = 618468143,
             },
-            // 2: After Double Jump (entering Tower)
+            // 2: After Gift (entering Tower)
             new SavedState
             {
                 rbPosition = new Vector2(-0.437f, 34.58f),
@@ -512,20 +657,43 @@ public class TigerMothPlugin : BaseUnityPlugin
         if (_labelStyle == null)
         {
             _labelStyle = new GUIStyle(GUI.skin.label);
-            _labelStyle.fontSize = 24;
+            _labelStyle.fontSize = 34;
             _labelStyle.normal.textColor = new Color(1f, 1f, 1f, 0.7f);
 
             _headerStyle = new GUIStyle(GUI.skin.label);
-            _headerStyle.fontSize = 24;
+            _headerStyle.fontSize = 34;
             _headerStyle.fontStyle = FontStyle.Bold;
             _headerStyle.normal.textColor = new Color(1f, 1f, 1f, 0.9f);
+
+            _splitNameStyle = new GUIStyle(GUI.skin.label);
+            _splitNameStyle.fontSize = 34;
+            _splitNameStyle.alignment = TextAnchor.MiddleLeft;
+            _splitNameStyle.normal.textColor = Color.white;
+
+            _splitTimeStyle = new GUIStyle(GUI.skin.label);
+            _splitTimeStyle.fontSize = 34;
+            _splitTimeStyle.alignment = TextAnchor.MiddleRight;
+            _splitTimeStyle.normal.textColor = Color.white;
+
+            _splitBgTex = new Texture2D(1, 1);
+            _splitBgTex.SetPixel(0, 0, new Color(0f, 0f, 0f, 0.75f));
+            _splitBgTex.Apply();
+            _splitBgStyle = new GUIStyle();
+            _splitBgStyle.normal.background = _splitBgTex;
+
+            _splitActiveTex = new Texture2D(1, 1);
+            _splitActiveTex.SetPixel(0, 0, new Color(1f, 1f, 1f, 0.08f));
+            _splitActiveTex.Apply();
+            _splitActiveStyle = new GUIStyle();
+            _splitActiveStyle.normal.background = _splitActiveTex;
         }
 
+        // ── TigerMoth overlay (top-left) ──
         float x = 10f;
         float y = 10f;
-        float lineHeight = 32f;
+        float lineHeight = 42f;
 
-        GUI.Label(new Rect(x, y, 500, lineHeight), "TigerMoth", _headerStyle);
+        GUI.Label(new Rect(x, y, 500, lineHeight), "TigerMoth v1.4.0", _headerStyle);
         y += lineHeight;
         GUI.Label(new Rect(x, y, 500, lineHeight), "H  Save    I  Load    1-4  Checkpoints", _labelStyle);
         y += lineHeight;
@@ -535,6 +703,126 @@ public class TigerMothPlugin : BaseUnityPlugin
         string zoomStr = _zoomSteps == 0 ? "0" : (_zoomSteps > 0 ? "+" + _zoomSteps : _zoomSteps.ToString());
         GUI.Label(new Rect(x, y, 500, lineHeight),
             string.Format("Zoom: {0}", zoomStr), _labelStyle);
+        y += lineHeight;
+
+        // ── Split timer table (top-right) ──
+        if (_runActive && _managedSplits.Count > 0)
+            DrawSplitTable();
+    }
+
+    private static readonly Color ColorAhead = new Color(0.27f, 1f, 0.27f);
+    private static readonly Color ColorBehind = new Color(1f, 0.27f, 0.27f);
+    private static readonly Color ColorGold = new Color(1f, 0.84f, 0f);
+    private static readonly Color ColorGray = new Color(0.5f, 0.5f, 0.5f);
+
+    private void DrawSplitTable()
+    {
+        const float nameW = 130f;
+        const float deltaW = 140f;
+        const float segW = 120f;
+        const float totalW = 120f;
+        const float tableW = nameW + deltaW + segW + totalW;
+        const float rowH = 46f;
+        const float pad = 6f;
+        float tableH = SplitNames.Length * rowH;
+
+        float tableX = Screen.width - tableW - pad * 2 - 10f;
+        float tableY = 10f;
+
+        // Background
+        GUI.Box(new Rect(tableX, tableY, tableW + pad * 2, tableH + pad * 2),
+            GUIContent.none, _splitBgStyle);
+
+        float cx = tableX + pad;
+        float cy = tableY + pad;
+
+        for (int i = 0; i < SplitNames.Length; i++)
+        {
+            float rowY = cy + i * rowH;
+            float colX = cx;
+            bool hasPb = _pbTotalTimes != null && i < _pbTotalTimes.Length
+                && _pbTotalTimes[i] > 0;
+            bool locked = _splitLocked != null && i < _splitLocked.Length
+                && _splitLocked[i];
+
+            // Highlight active row
+            if (i == _currentSplitIndex && !locked)
+                GUI.Box(new Rect(cx, rowY, tableW, rowH), GUIContent.none, _splitActiveStyle);
+
+            // Name
+            GUI.Label(new Rect(colX, rowY, nameW, rowH), SplitNames[i], _splitNameStyle);
+            colX += nameW;
+
+            if (locked)
+            {
+                // Delta
+                if (hasPb)
+                {
+                    float delta = _displayTotalTimes[i] - _pbTotalTimes[i];
+                    Color c = (_splitIsGold != null && _splitIsGold[i])
+                        ? ColorGold : (delta <= 0 ? ColorAhead : ColorBehind);
+                    string sign = delta >= 0 ? "+" : "\u2212";
+
+                    var orig = GUI.color;
+                    GUI.color = c;
+                    GUI.Label(new Rect(colX, rowY, deltaW, rowH),
+                        sign + FormatTime(Mathf.Abs(delta)), _splitTimeStyle);
+                    GUI.color = orig;
+                }
+                colX += deltaW;
+
+                // Segment
+                GUI.Label(new Rect(colX, rowY, segW, rowH),
+                    FormatTime(_displaySegTimes[i]), _splitTimeStyle);
+                colX += segW;
+
+                // Total
+                GUI.Label(new Rect(colX, rowY, totalW, rowH),
+                    FormatTime(_displayTotalTimes[i]), _splitTimeStyle);
+            }
+            else if (i == _currentSplitIndex && i < _managedSplits.Count
+                && _managedSplits[i] != null)
+            {
+                // Ticking — live delta + running total
+                float currentTime = (float)_splitTimeValueField.GetValue(_managedSplits[i]);
+
+                if (hasPb)
+                {
+                    float delta = currentTime - _pbTotalTimes[i];
+                    Color c = delta <= 0 ? ColorAhead : ColorBehind;
+                    string sign = delta >= 0 ? "+" : "\u2212";
+                    var orig = GUI.color;
+                    GUI.color = c;
+                    GUI.Label(new Rect(colX, rowY, deltaW, rowH),
+                        sign + FormatTime(Mathf.Abs(delta)), _splitTimeStyle);
+                    GUI.color = orig;
+                }
+                colX += deltaW;
+                colX += segW;
+
+                GUI.Label(new Rect(colX, rowY, totalW, rowH),
+                    FormatTime(currentTime), _splitTimeStyle);
+            }
+            else
+            {
+                // Future split — show PB hint or "--"
+                colX += deltaW;
+                colX += segW;
+
+                if (hasPb)
+                {
+                    var orig = GUI.color;
+                    GUI.color = ColorGray;
+                    GUI.Label(new Rect(colX, rowY, totalW, rowH),
+                        FormatTime(_pbTotalTimes[i]), _splitTimeStyle);
+                    GUI.color = orig;
+                }
+                else
+                {
+                    GUI.Label(new Rect(colX, rowY, totalW, rowH), "--", _splitTimeStyle);
+                }
+            }
+        }
     }
 
     // ── Save / Load ───────────────────────────────────────
@@ -604,7 +892,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         _queuedJumpField.SetValue(_moth, _savedState.queuedJump);
         _velocityBeforeHitstopField.SetValue(_moth, _savedState.velocityBeforeHitstop);
 
-        // Restore splits — destroy the ones GameManager.Awake created, rebuild ours
+        // Restore splits
         var splitsInstance = Singleton<SpeedrunSplits>.Instance;
         _splitsRunningField.SetValue(splitsInstance, true);
         var splitsList = (List<Split>)_splitsListField.GetValue(splitsInstance);
@@ -615,9 +903,21 @@ public class TigerMothPlugin : BaseUnityPlugin
         splitsList.Clear();
         _managedSplits.Clear();
 
+        // Rebuild tracking arrays
+        _runTotals = new float[SplitNames.Length];
+        _displaySegTimes = new float[SplitNames.Length];
+        _displayTotalTimes = new float[SplitNames.Length];
+        _splitLocked = new bool[SplitNames.Length];
+        _splitIsGold = new bool[SplitNames.Length];
+
+        for (int i = 0; i < _savedState.currentSplitIndex; i++)
+        {
+            if (_savedState.splitTimeValues != null && i < _savedState.splitTimeValues.Length)
+                _runTotals[i] = _savedState.splitTimeValues[i];
+        }
+
         for (int i = 0; i < SplitNames.Length; i++)
         {
-            string label = SplitNames[i] + ": ";
             float timeValue = (_savedState.splitTimeValues != null && i < _savedState.splitTimeValues.Length)
                 ? _savedState.splitTimeValues[i]
                 : 0f;
@@ -627,32 +927,29 @@ public class TigerMothPlugin : BaseUnityPlugin
             splitsList.Add(newSplit);
             _managedSplits.Add(newSplit);
 
-            _splitLabelField.SetValue(newSplit, label);
+            _splitLabelField.SetValue(newSplit, SplitNames[i]);
             _splitTimeValueField.SetValue(newSplit, timeValue);
             _splitTickingField.SetValue(newSplit, ticking);
-            ConfigureSplitDisplay(newSplit);
+            HideSplitVisuals(newSplit);
 
             if (i < _savedState.currentSplitIndex)
             {
                 newSplit.Lock();
                 _splitTimeValueField.SetValue(newSplit, timeValue);
-                SetSplitText(newSplit, label + timeValue.ToString("F"));
-            }
-            else if (i == _savedState.currentSplitIndex && ticking)
-            {
-                SetSplitText(newSplit, label + timeValue.ToString("F"));
-            }
-            else if (i > _savedState.currentSplitIndex)
-            {
-                SetSplitText(newSplit, label + "--");
+
+                float seg = i == 0 ? timeValue : timeValue - _runTotals[i - 1];
+                _displaySegTimes[i] = seg;
+                _displayTotalTimes[i] = timeValue;
+                _splitLocked[i] = true;
+                _splitIsGold[i] = _bestSegments != null && i < _bestSegments.Length
+                    && _bestSegments[i] > 0 && seg <= _bestSegments[i];
             }
         }
 
         _currentSplitIndex = _savedState.currentSplitIndex;
         _runActive = _savedState.currentSplitIndex >= 0;
 
-        // Restore ExtraJump powerup state (just the gameplay effect, not camera —
-        // camera zoom is restored separately from savedState.cameraTargetSize)
+        // Restore ExtraJump powerup state
         if (_extraJump != null)
         {
             bool currentlyUsed = (bool)_extraJumpUsedField.GetValue(_extraJump);
@@ -678,7 +975,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         if (animator != null && _savedState.animStateHash != 0)
             animator.Play(_savedState.animStateHash, 0, _savedState.animNormalizedTime);
 
-        // Restore camera position and zoom (layer user zoom on top of saved zoom)
+        // Restore camera position and zoom
         var cam = Singleton<AdvancedCamera>.Instance;
         float zoom = _savedState.cameraTargetSize + _zoomSteps * 2f;
         cam.targetSize = zoom;
