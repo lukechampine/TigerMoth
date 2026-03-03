@@ -137,12 +137,15 @@ public class TigerMothPlugin : BaseUnityPlugin
     private bool[] _splitIsGold;
 
     // GUI
-    private GUIStyle _labelStyle;
     private GUIStyle _headerStyle;
+    private GUIStyle _keycapStyle;
+    private GUIStyle _actionStyle;
+    private GUIStyle _infoStyle;
+    private Texture2D _keycapTex;
     private GUIStyle _splitNameStyle;
     private GUIStyle _splitTimeStyle;
-    private Texture2D _splitBgTex;
-    private GUIStyle _splitBgStyle;
+    private Texture2D _panelBgTex;
+    private GUIStyle _panelBgStyle;
     private Texture2D _splitActiveTex;
     private GUIStyle _splitActiveStyle;
 
@@ -183,7 +186,11 @@ public class TigerMothPlugin : BaseUnityPlugin
                 _rb = (Rigidbody2D)rbField.GetValue(_moth);
 
             if (Camera.main != null)
+            {
                 _defaultZoom = Camera.main.orthographicSize;
+                if (!_pendingLoad)
+                    _zoomSteps = 0;
+            }
 
             _splitsRunningField = typeof(SpeedrunSplits).GetField("running", flags);
             _splitsListField = typeof(SpeedrunSplits).GetField("splits", flags);
@@ -654,16 +661,32 @@ public class TigerMothPlugin : BaseUnityPlugin
         if (_moth == null)
             return;
 
-        if (_labelStyle == null)
+        if (_headerStyle == null)
         {
-            _labelStyle = new GUIStyle(GUI.skin.label);
-            _labelStyle.fontSize = 34;
-            _labelStyle.normal.textColor = new Color(1f, 1f, 1f, 0.7f);
-
             _headerStyle = new GUIStyle(GUI.skin.label);
             _headerStyle.fontSize = 34;
             _headerStyle.fontStyle = FontStyle.Bold;
             _headerStyle.normal.textColor = new Color(1f, 1f, 1f, 0.9f);
+
+            _keycapTex = new Texture2D(1, 1);
+            _keycapTex.SetPixel(0, 0, new Color(1f, 1f, 1f, 0.15f));
+            _keycapTex.Apply();
+            _keycapStyle = new GUIStyle(GUI.skin.label);
+            _keycapStyle.fontSize = 30;
+            _keycapStyle.fontStyle = FontStyle.Bold;
+            _keycapStyle.alignment = TextAnchor.MiddleCenter;
+            _keycapStyle.normal.textColor = new Color(1f, 1f, 1f, 0.95f);
+            _keycapStyle.normal.background = _keycapTex;
+
+            _actionStyle = new GUIStyle(GUI.skin.label);
+            _actionStyle.fontSize = 30;
+            _actionStyle.alignment = TextAnchor.MiddleLeft;
+            _actionStyle.normal.textColor = new Color(1f, 1f, 1f, 0.7f);
+
+            _infoStyle = new GUIStyle(GUI.skin.label);
+            _infoStyle.fontSize = 30;
+            _infoStyle.alignment = TextAnchor.MiddleLeft;
+            _infoStyle.normal.textColor = new Color(1f, 1f, 1f, 0.5f);
 
             _splitNameStyle = new GUIStyle(GUI.skin.label);
             _splitNameStyle.fontSize = 34;
@@ -675,11 +698,11 @@ public class TigerMothPlugin : BaseUnityPlugin
             _splitTimeStyle.alignment = TextAnchor.MiddleRight;
             _splitTimeStyle.normal.textColor = Color.white;
 
-            _splitBgTex = new Texture2D(1, 1);
-            _splitBgTex.SetPixel(0, 0, new Color(0f, 0f, 0f, 0.75f));
-            _splitBgTex.Apply();
-            _splitBgStyle = new GUIStyle();
-            _splitBgStyle.normal.background = _splitBgTex;
+            _panelBgTex = new Texture2D(1, 1);
+            _panelBgTex.SetPixel(0, 0, new Color(0f, 0f, 0f, 0.75f));
+            _panelBgTex.Apply();
+            _panelBgStyle = new GUIStyle();
+            _panelBgStyle.normal.background = _panelBgTex;
 
             _splitActiveTex = new Texture2D(1, 1);
             _splitActiveTex.SetPixel(0, 0, new Color(1f, 1f, 1f, 0.08f));
@@ -689,25 +712,60 @@ public class TigerMothPlugin : BaseUnityPlugin
         }
 
         // ── TigerMoth overlay (top-left) ──
-        float x = 10f;
-        float y = 10f;
-        float lineHeight = 42f;
-
-        GUI.Label(new Rect(x, y, 500, lineHeight), "TigerMoth v1.4.0", _headerStyle);
-        y += lineHeight;
-        GUI.Label(new Rect(x, y, 500, lineHeight), "H  Save    I  Load    1-4  Checkpoints", _labelStyle);
-        y += lineHeight;
-        GUI.Label(new Rect(x, y, 500, lineHeight), "[  Zoom in    ]  Zoom out", _labelStyle);
-        y += lineHeight;
-
-        string zoomStr = _zoomSteps == 0 ? "0" : (_zoomSteps > 0 ? "+" + _zoomSteps : _zoomSteps.ToString());
-        GUI.Label(new Rect(x, y, 500, lineHeight),
-            string.Format("Zoom: {0}", zoomStr), _labelStyle);
-        y += lineHeight;
+        DrawOverlay();
 
         // ── Split timer table (top-right) ──
         if (_runActive && _managedSplits.Count > 0)
             DrawSplitTable();
+    }
+
+    private void DrawOverlay()
+    {
+        const float pad = 10f;
+        const float rowH = 44f;
+        const float keycapW = 56f;
+        const float keycapH = 44f;
+        const float gap = 12f;
+        const float actionW = 200f;
+        const float padR = 16f;
+        const float tableW = keycapW + gap + actionW + padR;
+
+        string[][] bindings = new[] {
+            new[] { "H", "Save" },
+            new[] { "I", "Load" },
+            new[] { "1-4", "Checkpoints" },
+            new[] { "[", "Zoom in" },
+            new[] { "]", "Zoom out" },
+        };
+        float tableH = rowH + bindings.Length * rowH + rowH; // header + rows + info
+
+        float tableX = 10f;
+        float tableY = 10f;
+
+        // Background
+        GUI.Box(new Rect(tableX, tableY, tableW + pad * 2, tableH + pad * 2),
+            GUIContent.none, _panelBgStyle);
+
+        float cx = tableX + pad;
+        float cy = tableY + pad;
+
+        // Header
+        GUI.Label(new Rect(cx, cy, 400, rowH), "TigerMoth  v1.4.0", _headerStyle);
+        cy += rowH;
+
+        // Keybindings
+        for (int i = 0; i < bindings.Length; i++)
+        {
+            float ky = cy + (rowH - keycapH) * 0.5f;
+            GUI.Box(new Rect(cx, ky, keycapW, keycapH), bindings[i][0], _keycapStyle);
+            GUI.Label(new Rect(cx + keycapW + gap, cy, actionW, rowH),
+                bindings[i][1], _actionStyle);
+            cy += rowH;
+        }
+
+        // Zoom info
+        string zoomStr = _zoomSteps == 0 ? "0" : (_zoomSteps > 0 ? "+" + _zoomSteps : _zoomSteps.ToString());
+        GUI.Label(new Rect(cx, cy, tableW, rowH), "Zoom: " + zoomStr, _infoStyle);
     }
 
     private static readonly Color ColorAhead = new Color(0.27f, 1f, 0.27f);
@@ -731,7 +789,7 @@ public class TigerMothPlugin : BaseUnityPlugin
 
         // Background
         GUI.Box(new Rect(tableX, tableY, tableW + pad * 2, tableH + pad * 2),
-            GUIContent.none, _splitBgStyle);
+            GUIContent.none, _panelBgStyle);
 
         float cx = tableX + pad;
         float cy = tableY + pad;
