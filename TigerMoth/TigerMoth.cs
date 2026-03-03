@@ -39,6 +39,9 @@ public class TigerMothPlugin : BaseUnityPlugin
     private static readonly KeyCode[] CpKeys =
         { KeyCode.Alpha1, KeyCode.Alpha2, KeyCode.Alpha3, KeyCode.Alpha4 };
 
+    private static readonly KeyCode[] DumpKeys =
+        { KeyCode.Alpha7, KeyCode.Alpha8, KeyCode.Alpha9, KeyCode.Alpha0 };
+
     // ── Saved state ───────────────────────────────────────
     private class SavedState
     {
@@ -121,6 +124,10 @@ public class TigerMothPlugin : BaseUnityPlugin
     // Area triggers — colliders for position-based split detection
     private Dictionary<string, Collider2D> _areaColliders = new Dictionary<string, Collider2D>();
 
+    // Practice mode — entered on any load, exited on game reset (R)
+    private bool _practiceMode;
+    private int _practiceSkipIndex;
+
     // Camera zoom
     private float _defaultZoom;
     private int _zoomSteps;
@@ -128,6 +135,7 @@ public class TigerMothPlugin : BaseUnityPlugin
     // Personal best / gold tracking
     private float[] _pbTotalTimes;
     private float[] _bestSegments;
+    private float[] _bestSegmentsSnapshot; // frozen at run start for display deltas
     private float[] _runTotals;
 
     // Display data (read by OnGUI)
@@ -189,7 +197,10 @@ public class TigerMothPlugin : BaseUnityPlugin
             {
                 _defaultZoom = Camera.main.orthographicSize;
                 if (!_pendingLoad)
+                {
                     _zoomSteps = 0;
+                    _practiceMode = false;
+                }
             }
 
             _splitsRunningField = typeof(SpeedrunSplits).GetField("running", flags);
@@ -266,7 +277,11 @@ public class TigerMothPlugin : BaseUnityPlugin
             if (_savedState == null)
                 Logger.LogWarning("TigerMoth: no saved state to load");
             else
+            {
+                _practiceMode = true;
+                _practiceSkipIndex = _savedState.currentSplitIndex;
                 ReloadAndRestore();
+            }
         }
 
         // Checkpoints: 1,2,3,4 → load hardcoded checkpoints
@@ -275,7 +290,19 @@ public class TigerMothPlugin : BaseUnityPlugin
             if (Input.GetKeyDown(CpKeys[i]))
             {
                 _savedState = _checkpoints[i];
+                _practiceMode = true;
+                _practiceSkipIndex = _savedState.currentSplitIndex;
                 ReloadAndRestore();
+            }
+        }
+
+        // Dump state: 7,8,9,0 → write JSON to plugins/TigerMoth/
+        for (int i = 0; i < 4; i++)
+        {
+            if (Input.GetKeyDown(DumpKeys[i]))
+            {
+                SaveState();
+                DumpStateJson(i + 1);
             }
         }
 
@@ -372,6 +399,8 @@ public class TigerMothPlugin : BaseUnityPlugin
         _displayTotalTimes = new float[SplitNames.Length];
         _splitLocked = new bool[SplitNames.Length];
         _splitIsGold = new bool[SplitNames.Length];
+        _bestSegmentsSnapshot = _bestSegments != null
+            ? (float[])_bestSegments.Clone() : null;
 
         // Destroy the game's split — we create all of ours from scratch
         Object.Destroy(gameSplits[0].gameObject);
@@ -426,10 +455,34 @@ public class TigerMothPlugin : BaseUnityPlugin
         if (_currentSplitIndex >= _managedSplits.Count)
             return;
 
+        // In practice mode, skip the split we loaded into — don't record a time
+        if (_practiceMode && _currentSplitIndex == _practiceSkipIndex)
+        {
+            Logger.LogInfo(string.Format("TigerMoth: practice skip '{0}'",
+                SplitNames[_currentSplitIndex]));
+            _currentSplitIndex++;
+            if (_currentSplitIndex < _managedSplits.Count)
+            {
+                var next = _managedSplits[_currentSplitIndex];
+                _splitTimeValueField.SetValue(next, 0f);
+                _splitTickingField.SetValue(next, true);
+            }
+            return;
+        }
+
         float totalTime = _managedSplits[_currentSplitIndex].Lock();
-        float segmentTime = _currentSplitIndex == 0
-            ? totalTime
-            : totalTime - _runTotals[_currentSplitIndex - 1];
+        float segmentTime;
+        if (_practiceMode)
+        {
+            // In practice mode splits tick from 0, so totalTime IS the segment
+            segmentTime = totalTime;
+        }
+        else
+        {
+            segmentTime = _currentSplitIndex == 0
+                ? totalTime
+                : totalTime - _runTotals[_currentSplitIndex - 1];
+        }
         _runTotals[_currentSplitIndex] = totalTime;
 
         bool isGold = UpdateBestSegment(_currentSplitIndex, segmentTime);
@@ -449,7 +502,10 @@ public class TigerMothPlugin : BaseUnityPlugin
         if (_currentSplitIndex < _managedSplits.Count)
         {
             var next = _managedSplits[_currentSplitIndex];
-            _splitTimeValueField.SetValue(next, totalTime);
+            if (_practiceMode)
+                _splitTimeValueField.SetValue(next, 0f);
+            else
+                _splitTimeValueField.SetValue(next, totalTime);
             _splitTickingField.SetValue(next, true);
         }
     }
@@ -462,11 +518,22 @@ public class TigerMothPlugin : BaseUnityPlugin
         if (lastIdx >= _managedSplits.Count || _managedSplits[lastIdx] == null)
             return;
 
+        // In practice mode, if End is the skipped split, nothing to record
+        if (_practiceMode && _currentSplitIndex == _practiceSkipIndex)
+        {
+            _currentSplitIndex = SplitNames.Length;
+            return;
+        }
+
         // Lock() was already called by the game's EndRun
         float totalTime = (float)_splitTimeValueField.GetValue(_managedSplits[lastIdx]);
-        float segmentTime = lastIdx == 0
-            ? totalTime
-            : totalTime - _runTotals[lastIdx - 1];
+        float segmentTime;
+        if (_practiceMode)
+            segmentTime = totalTime;
+        else
+            segmentTime = lastIdx == 0
+                ? totalTime
+                : totalTime - _runTotals[lastIdx - 1];
         _runTotals[lastIdx] = totalTime;
 
         bool isGold = UpdateBestSegment(lastIdx, segmentTime);
@@ -476,16 +543,19 @@ public class TigerMothPlugin : BaseUnityPlugin
         _splitLocked[lastIdx] = true;
         _splitIsGold[lastIdx] = isGold;
 
-        // Check for PB — all splits must have been hit in this run
-        bool complete = true;
-        for (int i = 0; i < SplitNames.Length; i++)
+        // Check for PB only in normal mode (practice runs skip splits)
+        if (!_practiceMode)
         {
-            if (_runTotals[i] <= 0) { complete = false; break; }
-        }
-        if (complete && (_pbTotalTimes == null || totalTime < _pbTotalTimes[lastIdx]))
-        {
-            _pbTotalTimes = (float[])_runTotals.Clone();
-            Logger.LogInfo("TigerMoth: New PB! " + FormatTime(totalTime));
+            bool complete = true;
+            for (int i = 0; i < SplitNames.Length; i++)
+            {
+                if (_runTotals[i] <= 0) { complete = false; break; }
+            }
+            if (complete && (_pbTotalTimes == null || totalTime < _pbTotalTimes[lastIdx]))
+            {
+                _pbTotalTimes = (float[])_runTotals.Clone();
+                Logger.LogInfo("TigerMoth: New PB! " + FormatTime(totalTime));
+            }
         }
 
         SavePB();
@@ -597,57 +667,57 @@ public class TigerMothPlugin : BaseUnityPlugin
     {
         return new[]
         {
-            // 1: Start area (before Church)
+            // 1: Before Church
             new SavedState
             {
-                rbPosition = new Vector2(-22.591f, 7.028f),
+                rbPosition = new Vector2(-13.344f, 8.546f),
                 jumps = 1,
-                facingDirection = 1,
+                facingDirection = -1,
                 currentSplitIndex = 0,
                 cameraTargetSize = 5.2f,
-                cameraPosition = new Vector3(-21.63f, 10.325f, -10f),
-                spiderPosition = new Vector3(-26.567f, 67.769f, -0.079f),
+                cameraPosition = new Vector3(-14.333f, 11.806f, -10f),
+                spiderPosition = new Vector3(-23.748f, 12.803f, 0f),
+                spiderCanFollow = true,
                 animStateHash = 618468143,
             },
-            // 2: After Gift (entering Tower)
+            // 2: Before Gift
             new SavedState
             {
-                rbPosition = new Vector2(-0.437f, 34.58f),
-                jumps = 2,
-                facingDirection = -1,
-                currentSplitIndex = 2,
-                extraJumpUsed = true,
-                cameraTargetSize = 6.2f,
-                cameraPosition = new Vector3(-1.426f, 37.846f, -10f),
-                spiderPosition = new Vector3(-26.424f, 34.553f, 0f),
+                rbPosition = new Vector2(-4.648f, 30.696f),
+                jumps = 1,
+                facingDirection = 1,
+                currentSplitIndex = 1,
+                cameraTargetSize = 5.2f,
+                cameraPosition = new Vector3(-1.968f, 35.130f, -10f),
+                spiderPosition = new Vector3(-26.367f, 28.627f, 0f),
                 spiderCanFollow = true,
                 animStateHash = 618468143,
             },
             // 3: Mid-Tower
             new SavedState
             {
-                rbPosition = new Vector2(-32.829f, 71.38f),
+                rbPosition = new Vector2(-27.123f, 98.755f),
                 jumps = 2,
-                facingDirection = -1,
+                facingDirection = 1,
                 currentSplitIndex = 2,
                 extraJumpUsed = true,
                 cameraTargetSize = 6.2f,
-                cameraPosition = new Vector3(-33.819f, 74.629f, -10f),
-                spiderPosition = new Vector3(-25.026f, 46.041f, 0f),
+                cameraPosition = new Vector3(-26.134f, 102.012f, -10f),
+                spiderPosition = new Vector3(-21.193f, 11.682f, 0f),
                 spiderCanFollow = true,
                 animStateHash = 618468143,
             },
             // 4: Near End
             new SavedState
             {
-                rbPosition = new Vector2(-21.371f, 135.431f),
+                rbPosition = new Vector2(-6.102f, 153.932f),
                 jumps = 2,
                 facingDirection = -1,
                 currentSplitIndex = 3,
                 extraJumpUsed = true,
-                cameraTargetSize = 7.819f,
-                cameraPosition = new Vector3(-22.329f, 138.661f, -10f),
-                spiderPosition = new Vector3(-23.915f, 13.268f, 0f),
+                cameraTargetSize = 8.5f,
+                cameraPosition = new Vector3(-7.091f, 157.190f, -10f),
+                spiderPosition = new Vector3(-26.468f, 26.954f, 0f),
                 spiderCanFollow = true,
                 animStateHash = 618468143,
             },
@@ -763,7 +833,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             cy += rowH;
         }
 
-        // Zoom info
+        // Info line
         string zoomStr = _zoomSteps == 0 ? "0" : (_zoomSteps > 0 ? "+" + _zoomSteps : _zoomSteps.ToString());
         GUI.Label(new Rect(cx, cy, tableW, rowH), "Zoom: " + zoomStr, _infoStyle);
     }
@@ -779,10 +849,14 @@ public class TigerMothPlugin : BaseUnityPlugin
         const float deltaW = 140f;
         const float segW = 120f;
         const float totalW = 120f;
-        const float tableW = nameW + deltaW + segW + totalW;
         const float rowH = 46f;
         const float pad = 6f;
-        float tableH = SplitNames.Length * rowH;
+
+        float tableW = _practiceMode
+            ? nameW + deltaW + segW
+            : nameW + deltaW + segW + totalW;
+        float headerH = _practiceMode ? rowH : 0f;
+        float tableH = headerH + SplitNames.Length * rowH;
 
         float tableX = Screen.width - tableW - pad * 2 - 10f;
         float tableY = 10f;
@@ -794,14 +868,24 @@ public class TigerMothPlugin : BaseUnityPlugin
         float cx = tableX + pad;
         float cy = tableY + pad;
 
+        // Practice mode header
+        if (_practiceMode)
+        {
+            GUI.Label(new Rect(cx, cy, tableW, rowH), "Practice Mode", _headerStyle);
+            cy += rowH;
+        }
+
         for (int i = 0; i < SplitNames.Length; i++)
         {
             float rowY = cy + i * rowH;
             float colX = cx;
+            bool hasGold = _bestSegmentsSnapshot != null && i < _bestSegmentsSnapshot.Length
+                && _bestSegmentsSnapshot[i] > 0;
             bool hasPb = _pbTotalTimes != null && i < _pbTotalTimes.Length
                 && _pbTotalTimes[i] > 0;
             bool locked = _splitLocked != null && i < _splitLocked.Length
                 && _splitLocked[i];
+            bool isSkipped = _practiceMode && i <= _practiceSkipIndex;
 
             // Highlight active row
             if (i == _currentSplitIndex && !locked)
@@ -811,73 +895,144 @@ public class TigerMothPlugin : BaseUnityPlugin
             GUI.Label(new Rect(colX, rowY, nameW, rowH), SplitNames[i], _splitNameStyle);
             colX += nameW;
 
-            if (locked)
+            if (isSkipped && !locked)
             {
-                // Delta
-                if (hasPb)
-                {
-                    float delta = _displayTotalTimes[i] - _pbTotalTimes[i];
-                    Color c = (_splitIsGold != null && _splitIsGold[i])
-                        ? ColorGold : (delta <= 0 ? ColorAhead : ColorBehind);
-                    string sign = delta >= 0 ? "+" : "\u2212";
-
-                    var orig = GUI.color;
-                    GUI.color = c;
-                    GUI.Label(new Rect(colX, rowY, deltaW, rowH),
-                        sign + FormatTime(Mathf.Abs(delta)), _splitTimeStyle);
-                    GUI.color = orig;
-                }
+                // Skipped/prior splits in practice mode — show "--"
                 colX += deltaW;
+                GUI.Label(new Rect(colX, rowY, segW, rowH), "--", _splitTimeStyle);
+            }
+            else if (locked)
+            {
+                if (_practiceMode)
+                {
+                    // Delta vs best segment
+                    if (hasGold)
+                    {
+                        float delta = _displaySegTimes[i] - _bestSegmentsSnapshot[i];
+                        Color c = (_splitIsGold != null && _splitIsGold[i])
+                            ? ColorGold : (delta <= 0 ? ColorAhead : ColorBehind);
+                        string sign = delta >= 0 ? "+" : "\u2212";
+                        var orig = GUI.color;
+                        GUI.color = c;
+                        GUI.Label(new Rect(colX, rowY, deltaW, rowH),
+                            sign + FormatTime(Mathf.Abs(delta)), _splitTimeStyle);
+                        GUI.color = orig;
+                    }
+                    colX += deltaW;
 
-                // Segment
-                GUI.Label(new Rect(colX, rowY, segW, rowH),
-                    FormatTime(_displaySegTimes[i]), _splitTimeStyle);
-                colX += segW;
+                    // Segment
+                    GUI.Label(new Rect(colX, rowY, segW, rowH),
+                        FormatTime(_displaySegTimes[i]), _splitTimeStyle);
+                }
+                else
+                {
+                    // Normal mode: delta vs PB total
+                    if (hasPb)
+                    {
+                        float delta = _displayTotalTimes[i] - _pbTotalTimes[i];
+                        Color c = (_splitIsGold != null && _splitIsGold[i])
+                            ? ColorGold : (delta <= 0 ? ColorAhead : ColorBehind);
+                        string sign = delta >= 0 ? "+" : "\u2212";
+                        var orig = GUI.color;
+                        GUI.color = c;
+                        GUI.Label(new Rect(colX, rowY, deltaW, rowH),
+                            sign + FormatTime(Mathf.Abs(delta)), _splitTimeStyle);
+                        GUI.color = orig;
+                    }
+                    colX += deltaW;
 
-                // Total
-                GUI.Label(new Rect(colX, rowY, totalW, rowH),
-                    FormatTime(_displayTotalTimes[i]), _splitTimeStyle);
+                    // Segment
+                    GUI.Label(new Rect(colX, rowY, segW, rowH),
+                        FormatTime(_displaySegTimes[i]), _splitTimeStyle);
+                    colX += segW;
+
+                    // Total
+                    GUI.Label(new Rect(colX, rowY, totalW, rowH),
+                        FormatTime(_displayTotalTimes[i]), _splitTimeStyle);
+                }
             }
             else if (i == _currentSplitIndex && i < _managedSplits.Count
                 && _managedSplits[i] != null)
             {
-                // Ticking — live delta + running total
+                // Ticking split
                 float currentTime = (float)_splitTimeValueField.GetValue(_managedSplits[i]);
 
-                if (hasPb)
+                if (_practiceMode)
                 {
-                    float delta = currentTime - _pbTotalTimes[i];
-                    Color c = delta <= 0 ? ColorAhead : ColorBehind;
-                    string sign = delta >= 0 ? "+" : "\u2212";
-                    var orig = GUI.color;
-                    GUI.color = c;
-                    GUI.Label(new Rect(colX, rowY, deltaW, rowH),
-                        sign + FormatTime(Mathf.Abs(delta)), _splitTimeStyle);
-                    GUI.color = orig;
-                }
-                colX += deltaW;
-                colX += segW;
+                    // Live delta vs best segment
+                    if (hasGold)
+                    {
+                        float delta = currentTime - _bestSegmentsSnapshot[i];
+                        Color c = delta <= 0 ? ColorAhead : ColorBehind;
+                        string sign = delta >= 0 ? "+" : "\u2212";
+                        var orig = GUI.color;
+                        GUI.color = c;
+                        GUI.Label(new Rect(colX, rowY, deltaW, rowH),
+                            sign + FormatTime(Mathf.Abs(delta)), _splitTimeStyle);
+                        GUI.color = orig;
+                    }
+                    colX += deltaW;
 
-                GUI.Label(new Rect(colX, rowY, totalW, rowH),
-                    FormatTime(currentTime), _splitTimeStyle);
-            }
-            else
-            {
-                // Future split — show PB hint or "--"
-                colX += deltaW;
-                colX += segW;
-
-                if (hasPb)
-                {
-                    var orig = GUI.color;
-                    GUI.color = ColorGray;
-                    GUI.Label(new Rect(colX, rowY, totalW, rowH),
-                        FormatTime(_pbTotalTimes[i]), _splitTimeStyle);
-                    GUI.color = orig;
+                    GUI.Label(new Rect(colX, rowY, segW, rowH),
+                        FormatTime(currentTime), _splitTimeStyle);
                 }
                 else
                 {
-                    GUI.Label(new Rect(colX, rowY, totalW, rowH), "--", _splitTimeStyle);
+                    // Live delta vs PB total
+                    if (hasPb)
+                    {
+                        float delta = currentTime - _pbTotalTimes[i];
+                        Color c = delta <= 0 ? ColorAhead : ColorBehind;
+                        string sign = delta >= 0 ? "+" : "\u2212";
+                        var orig = GUI.color;
+                        GUI.color = c;
+                        GUI.Label(new Rect(colX, rowY, deltaW, rowH),
+                            sign + FormatTime(Mathf.Abs(delta)), _splitTimeStyle);
+                        GUI.color = orig;
+                    }
+                    colX += deltaW;
+                    colX += segW;
+
+                    GUI.Label(new Rect(colX, rowY, totalW, rowH),
+                        FormatTime(currentTime), _splitTimeStyle);
+                }
+            }
+            else
+            {
+                // Future split
+                colX += deltaW;
+
+                if (_practiceMode)
+                {
+                    if (hasGold)
+                    {
+                        var orig = GUI.color;
+                        GUI.color = ColorGray;
+                        GUI.Label(new Rect(colX, rowY, segW, rowH),
+                            FormatTime(_bestSegmentsSnapshot[i]), _splitTimeStyle);
+                        GUI.color = orig;
+                    }
+                    else
+                    {
+                        GUI.Label(new Rect(colX, rowY, segW, rowH), "--", _splitTimeStyle);
+                    }
+                }
+                else
+                {
+                    colX += segW;
+
+                    if (hasPb)
+                    {
+                        var orig = GUI.color;
+                        GUI.color = ColorGray;
+                        GUI.Label(new Rect(colX, rowY, totalW, rowH),
+                            FormatTime(_pbTotalTimes[i]), _splitTimeStyle);
+                        GUI.color = orig;
+                    }
+                    else
+                    {
+                        GUI.Label(new Rect(colX, rowY, totalW, rowH), "--", _splitTimeStyle);
+                    }
                 }
             }
         }
@@ -926,6 +1081,55 @@ public class TigerMothPlugin : BaseUnityPlugin
             _savedState.rbPosition.x, _savedState.rbPosition.y, _currentSplitIndex));
     }
 
+    private void DumpStateJson(int slot)
+    {
+        if (_savedState == null)
+            return;
+
+        var s = _savedState;
+        var ci = CultureInfo.InvariantCulture;
+        string json = string.Format(ci,
+@"{{
+  ""rbPosition"": [{0}, {1}],
+  ""rbVelocity"": [{2}, {3}],
+  ""jumps"": {4},
+  ""chargingTime"": {5},
+  ""facingDirection"": {6},
+  ""jumpCanceled"": {7},
+  ""hitstopActive"": {8},
+  ""queuedJump"": {9},
+  ""velocityBeforeHitstop"": [{10}, {11}],
+  ""currentSplitIndex"": {12},
+  ""extraJumpUsed"": {13},
+  ""cameraTargetSize"": {14},
+  ""cameraPosition"": [{15}, {16}, {17}],
+  ""spiderPosition"": [{18}, {19}, {20}],
+  ""spiderCanFollow"": {21},
+  ""animStateHash"": {22},
+  ""animNormalizedTime"": {23}
+}}",
+            s.rbPosition.x, s.rbPosition.y,
+            s.rbVelocity.x, s.rbVelocity.y,
+            s.jumps, s.chargingTime, s.facingDirection,
+            s.jumpCanceled.ToString().ToLower(),
+            s.hitstopActive.ToString().ToLower(),
+            s.queuedJump.ToString().ToLower(),
+            s.velocityBeforeHitstop.x, s.velocityBeforeHitstop.y,
+            s.currentSplitIndex,
+            s.extraJumpUsed.ToString().ToLower(),
+            s.cameraTargetSize,
+            s.cameraPosition.x, s.cameraPosition.y, s.cameraPosition.z,
+            s.spiderPosition.x, s.spiderPosition.y, s.spiderPosition.z,
+            s.spiderCanFollow.ToString().ToLower(),
+            s.animStateHash, s.animNormalizedTime);
+
+        string dir = Path.Combine(BepInEx.Paths.PluginPath, "TigerMoth");
+        Directory.CreateDirectory(dir);
+        string path = Path.Combine(dir, "checkpoint" + slot + ".json");
+        File.WriteAllText(path, json);
+        Logger.LogInfo("TigerMoth: dumped state to " + path);
+    }
+
     private void ApplyState()
     {
         if (_savedState == null || _rb == null)
@@ -967,6 +1171,8 @@ public class TigerMothPlugin : BaseUnityPlugin
         _displayTotalTimes = new float[SplitNames.Length];
         _splitLocked = new bool[SplitNames.Length];
         _splitIsGold = new bool[SplitNames.Length];
+        _bestSegmentsSnapshot = _bestSegments != null
+            ? (float[])_bestSegments.Clone() : null;
 
         for (int i = 0; i < _savedState.currentSplitIndex; i++)
         {
@@ -979,7 +1185,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             float timeValue = (_savedState.splitTimeValues != null && i < _savedState.splitTimeValues.Length)
                 ? _savedState.splitTimeValues[i]
                 : 0f;
-            bool ticking = (i == _savedState.currentSplitIndex);
+            bool ticking = (i == _savedState.currentSplitIndex) && !_practiceMode;
 
             var newSplit = Object.Instantiate(splitPrefab, splitsInstance.transform).GetComponent<Split>();
             splitsList.Add(newSplit);
@@ -990,7 +1196,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             _splitTickingField.SetValue(newSplit, ticking);
             HideSplitVisuals(newSplit);
 
-            if (i < _savedState.currentSplitIndex)
+            if (i < _savedState.currentSplitIndex && !_practiceMode)
             {
                 newSplit.Lock();
                 _splitTimeValueField.SetValue(newSplit, timeValue);
