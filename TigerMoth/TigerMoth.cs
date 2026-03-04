@@ -152,6 +152,7 @@ public class TigerMothPlugin : BaseUnityPlugin
     private Texture2D _keycapTex;
     private GUIStyle _splitNameStyle;
     private GUIStyle _splitTimeStyle;
+    private GUIStyle _timerStyle;
     private Texture2D _panelBgTex;
     private GUIStyle _panelBgStyle;
     private Texture2D _splitActiveTex;
@@ -470,20 +471,24 @@ public class TigerMothPlugin : BaseUnityPlugin
             return;
         }
 
-        float totalTime = _managedSplits[_currentSplitIndex].Lock();
+        float rawTime = _managedSplits[_currentSplitIndex].Lock();
         float segmentTime;
+        float totalTime;
         if (_practiceMode)
         {
-            // In practice mode splits tick from 0, so totalTime IS the segment
-            segmentTime = totalTime;
+            // In practice mode splits tick from 0, so rawTime IS the segment
+            segmentTime = rawTime;
+            float prevTotal = _currentSplitIndex > 0 ? _displayTotalTimes[_currentSplitIndex - 1] : 0f;
+            totalTime = prevTotal + segmentTime;
         }
         else
         {
+            totalTime = rawTime;
             segmentTime = _currentSplitIndex == 0
                 ? totalTime
                 : totalTime - _runTotals[_currentSplitIndex - 1];
         }
-        _runTotals[_currentSplitIndex] = totalTime;
+        _runTotals[_currentSplitIndex] = rawTime;
 
         bool isGold = UpdateBestSegment(_currentSplitIndex, segmentTime);
 
@@ -768,6 +773,12 @@ public class TigerMothPlugin : BaseUnityPlugin
             _splitTimeStyle.alignment = TextAnchor.MiddleRight;
             _splitTimeStyle.normal.textColor = Color.white;
 
+            _timerStyle = new GUIStyle(GUI.skin.label);
+            _timerStyle.fontSize = 48;
+            _timerStyle.fontStyle = FontStyle.Bold;
+            _timerStyle.alignment = TextAnchor.MiddleRight;
+            _timerStyle.normal.textColor = Color.white;
+
             _panelBgTex = new Texture2D(1, 1);
             _panelBgTex.SetPixel(0, 0, new Color(0f, 0f, 0f, 0.75f));
             _panelBgTex.Apply();
@@ -845,18 +856,22 @@ public class TigerMothPlugin : BaseUnityPlugin
 
     private void DrawSplitTable()
     {
-        const float nameW = 130f;
+        const float nameW = 140f;
         const float deltaW = 140f;
-        const float segW = 120f;
-        const float totalW = 120f;
+        const float segW = 130f;
+        const float totalW = 130f;
+        const float tableW = nameW + deltaW + segW + totalW;
         const float rowH = 46f;
+        const float timerH = 60f;
+        const float timerGap = 8f;
+        const float infoH = 36f;
         const float pad = 6f;
 
-        float tableW = _practiceMode
-            ? nameW + deltaW + segW
-            : nameW + deltaW + segW + totalW;
         float headerH = _practiceMode ? rowH : 0f;
-        float tableH = headerH + SplitNames.Length * rowH;
+        bool hasGolds = _bestSegmentsSnapshot != null
+            && _bestSegmentsSnapshot.Length >= SplitNames.Length;
+        float tableH = headerH + SplitNames.Length * rowH + timerGap + timerH
+            + (hasGolds ? infoH : 0f);
 
         float tableX = Screen.width - tableW - pad * 2 - 10f;
         float tableY = 10f;
@@ -875,14 +890,37 @@ public class TigerMothPlugin : BaseUnityPlugin
             cy += rowH;
         }
 
+        // In practice mode, use gold cumulative totals as reference
+        // In normal mode, use PB totals
+        float[] refTotals = null;
+        float[] refSegs = null;
+        if (_practiceMode && hasGolds)
+        {
+            refTotals = new float[SplitNames.Length];
+            refSegs = new float[SplitNames.Length];
+            float sum = 0f;
+            for (int i = 0; i < SplitNames.Length; i++)
+            {
+                refSegs[i] = _bestSegmentsSnapshot[i];
+                sum += _bestSegmentsSnapshot[i];
+                refTotals[i] = sum;
+            }
+        }
+        else if (!_practiceMode && _pbTotalTimes != null)
+        {
+            refTotals = _pbTotalTimes;
+            refSegs = new float[SplitNames.Length];
+            for (int i = 0; i < SplitNames.Length; i++)
+                refSegs[i] = i == 0 ? _pbTotalTimes[0]
+                    : _pbTotalTimes[i] - _pbTotalTimes[i - 1];
+        }
+        bool hasRef = refTotals != null;
+
+        // ── Split rows (static — no ticking inline) ──
         for (int i = 0; i < SplitNames.Length; i++)
         {
             float rowY = cy + i * rowH;
             float colX = cx;
-            bool hasGold = _bestSegmentsSnapshot != null && i < _bestSegmentsSnapshot.Length
-                && _bestSegmentsSnapshot[i] > 0;
-            bool hasPb = _pbTotalTimes != null && i < _pbTotalTimes.Length
-                && _pbTotalTimes[i] > 0;
             bool locked = _splitLocked != null && i < _splitLocked.Length
                 && _splitLocked[i];
             bool isSkipped = _practiceMode && i <= _practiceSkipIndex;
@@ -900,142 +938,95 @@ public class TigerMothPlugin : BaseUnityPlugin
                 // Skipped/prior splits in practice mode — show "--"
                 colX += deltaW;
                 GUI.Label(new Rect(colX, rowY, segW, rowH), "--", _splitTimeStyle);
+                colX += segW;
+                GUI.Label(new Rect(colX, rowY, totalW, rowH), "--", _splitTimeStyle);
             }
             else if (locked)
             {
-                if (_practiceMode)
-                {
-                    // Delta vs best segment
-                    if (hasGold)
-                    {
-                        float delta = _displaySegTimes[i] - _bestSegmentsSnapshot[i];
-                        Color c = (_splitIsGold != null && _splitIsGold[i])
-                            ? ColorGold : (delta <= 0 ? ColorAhead : ColorBehind);
-                        string sign = delta >= 0 ? "+" : "\u2212";
-                        var orig = GUI.color;
-                        GUI.color = c;
-                        GUI.Label(new Rect(colX, rowY, deltaW, rowH),
-                            sign + FormatTime(Mathf.Abs(delta)), _splitTimeStyle);
-                        GUI.color = orig;
-                    }
-                    colX += deltaW;
-
-                    // Segment
-                    GUI.Label(new Rect(colX, rowY, segW, rowH),
-                        FormatTime(_displaySegTimes[i]), _splitTimeStyle);
-                }
-                else
-                {
-                    // Normal mode: delta vs PB total
-                    if (hasPb)
-                    {
-                        float delta = _displayTotalTimes[i] - _pbTotalTimes[i];
-                        Color c = (_splitIsGold != null && _splitIsGold[i])
-                            ? ColorGold : (delta <= 0 ? ColorAhead : ColorBehind);
-                        string sign = delta >= 0 ? "+" : "\u2212";
-                        var orig = GUI.color;
-                        GUI.color = c;
-                        GUI.Label(new Rect(colX, rowY, deltaW, rowH),
-                            sign + FormatTime(Mathf.Abs(delta)), _splitTimeStyle);
-                        GUI.color = orig;
-                    }
-                    colX += deltaW;
-
-                    // Segment
-                    GUI.Label(new Rect(colX, rowY, segW, rowH),
-                        FormatTime(_displaySegTimes[i]), _splitTimeStyle);
-                    colX += segW;
-
-                    // Total
-                    GUI.Label(new Rect(colX, rowY, totalW, rowH),
-                        FormatTime(_displayTotalTimes[i]), _splitTimeStyle);
-                }
-            }
-            else if (i == _currentSplitIndex && i < _managedSplits.Count
-                && _managedSplits[i] != null)
-            {
-                // Ticking split
-                float currentTime = (float)_splitTimeValueField.GetValue(_managedSplits[i]);
-
-                if (_practiceMode)
-                {
-                    // Live delta vs best segment
-                    if (hasGold)
-                    {
-                        float delta = currentTime - _bestSegmentsSnapshot[i];
-                        Color c = delta <= 0 ? ColorAhead : ColorBehind;
-                        string sign = delta >= 0 ? "+" : "\u2212";
-                        var orig = GUI.color;
-                        GUI.color = c;
-                        GUI.Label(new Rect(colX, rowY, deltaW, rowH),
-                            sign + FormatTime(Mathf.Abs(delta)), _splitTimeStyle);
-                        GUI.color = orig;
-                    }
-                    colX += deltaW;
-
-                    GUI.Label(new Rect(colX, rowY, segW, rowH),
-                        FormatTime(currentTime), _splitTimeStyle);
-                }
-                else
-                {
-                    // Live delta vs PB total
-                    if (hasPb)
-                    {
-                        float delta = currentTime - _pbTotalTimes[i];
-                        Color c = delta <= 0 ? ColorAhead : ColorBehind;
-                        string sign = delta >= 0 ? "+" : "\u2212";
-                        var orig = GUI.color;
-                        GUI.color = c;
-                        GUI.Label(new Rect(colX, rowY, deltaW, rowH),
-                            sign + FormatTime(Mathf.Abs(delta)), _splitTimeStyle);
-                        GUI.color = orig;
-                    }
-                    colX += deltaW;
-                    colX += segW;
-
-                    GUI.Label(new Rect(colX, rowY, totalW, rowH),
-                        FormatTime(currentTime), _splitTimeStyle);
-                }
+                // Completed split — delta vs reference, actual times
+                if (hasRef)
+                    DrawDelta(colX, rowY, deltaW, rowH,
+                        _displayTotalTimes[i] - refTotals[i],
+                        _splitIsGold != null && _splitIsGold[i]);
+                colX += deltaW;
+                GUI.Label(new Rect(colX, rowY, segW, rowH),
+                    FormatTime(_displaySegTimes[i]), _splitTimeStyle);
+                colX += segW;
+                GUI.Label(new Rect(colX, rowY, totalW, rowH),
+                    FormatTime(_displayTotalTimes[i]), _splitTimeStyle);
             }
             else
             {
-                // Future split
+                // Future/active split — show reference values in gray
+                bool isActive = i == _currentSplitIndex && i < _managedSplits.Count
+                    && _managedSplits[i] != null;
+                float liveTime = isActive
+                    ? (float)_splitTimeValueField.GetValue(_managedSplits[i]) : 0f;
+
+                if (isActive && hasRef && liveTime >= refTotals[i] - 5f)
+                    DrawDelta(colX, rowY, deltaW, rowH, liveTime - refTotals[i], false, true);
                 colX += deltaW;
 
-                if (_practiceMode)
-                {
-                    if (hasGold)
-                    {
-                        var orig = GUI.color;
-                        GUI.color = ColorGray;
-                        GUI.Label(new Rect(colX, rowY, segW, rowH),
-                            FormatTime(_bestSegmentsSnapshot[i]), _splitTimeStyle);
-                        GUI.color = orig;
-                    }
-                    else
-                    {
-                        GUI.Label(new Rect(colX, rowY, segW, rowH), "--", _splitTimeStyle);
-                    }
-                }
-                else
-                {
-                    colX += segW;
-
-                    if (hasPb)
-                    {
-                        var orig = GUI.color;
-                        GUI.color = ColorGray;
-                        GUI.Label(new Rect(colX, rowY, totalW, rowH),
-                            FormatTime(_pbTotalTimes[i]), _splitTimeStyle);
-                        GUI.color = orig;
-                    }
-                    else
-                    {
-                        GUI.Label(new Rect(colX, rowY, totalW, rowH), "--", _splitTimeStyle);
-                    }
-                }
+                var orig = GUI.color;
+                GUI.color = ColorGray;
+                GUI.Label(new Rect(colX, rowY, segW, rowH),
+                    hasRef ? FormatTime(refSegs[i]) : "--", _splitTimeStyle);
+                colX += segW;
+                GUI.Label(new Rect(colX, rowY, totalW, rowH),
+                    hasRef ? FormatTime(refTotals[i]) : "--", _splitTimeStyle);
+                GUI.color = orig;
             }
         }
+
+        // ── Bottom live timer ──
+        float timerY = cy + SplitNames.Length * rowH + timerGap;
+        if (_currentSplitIndex >= 0 && _currentSplitIndex < _managedSplits.Count
+            && _managedSplits[_currentSplitIndex] != null)
+        {
+            float liveTime = (float)_splitTimeValueField.GetValue(
+                _managedSplits[_currentSplitIndex]);
+            GUI.Label(new Rect(cx, timerY, tableW, timerH),
+                FormatTime(liveTime), _timerStyle);
+        }
+        else if (_currentSplitIndex >= SplitNames.Length && _displayTotalTimes != null)
+        {
+            float finalTime = _displayTotalTimes[SplitNames.Length - 1];
+            GUI.Label(new Rect(cx, timerY, tableW, timerH),
+                FormatTime(finalTime), _timerStyle);
+        }
+
+        // ── Best Possible Time ──
+        if (hasGolds)
+        {
+            float bpt = 0f;
+            for (int i = 0; i < SplitNames.Length; i++)
+                bpt += _bestSegmentsSnapshot[i];
+            float bptY = timerY + timerH;
+            var orig2 = GUI.color;
+            GUI.color = ColorGray;
+            GUI.Label(new Rect(cx, bptY, tableW, infoH), "Best Possible Time", _infoStyle);
+            GUI.Label(new Rect(cx, bptY, tableW, infoH), FormatTime(bpt), _splitTimeStyle);
+            GUI.color = orig2;
+        }
+    }
+
+    private void DrawDelta(float x, float y, float w, float h, float delta, bool isGold,
+        bool live = false)
+    {
+        Color c = isGold ? ColorGold : (delta <= 0 ? ColorAhead : ColorBehind);
+        string sign = delta >= 0 ? "+" : "\u2212";
+        string secs = sign + Mathf.Abs(delta).ToString("F0");
+        string decs = "." + Mathf.Abs(delta).ToString("F2").Substring(
+            Mathf.Abs(delta).ToString("F2").IndexOf('.') + 1);
+        float decW = _splitTimeStyle.CalcSize(new GUIContent(decs)).x;
+
+        var orig = GUI.color;
+        GUI.color = c;
+        // Seconds right-aligned, leaving room for decimals on the right
+        GUI.Label(new Rect(x, y, w - decW, h), secs, _splitTimeStyle);
+        if (!live)
+            GUI.Label(new Rect(x + w - decW, y, decW, h), decs, _splitTimeStyle);
+        GUI.color = orig;
     }
 
     // ── Save / Load ───────────────────────────────────────
