@@ -73,6 +73,7 @@ public class TigerMothPlugin : BaseUnityPlugin
     // ── Fields ────────────────────────────────────────────
     private MothController _moth;
     private Rigidbody2D _rb;
+    private GameObject _ghost;
     private SavedState _savedState;
     private SavedState[] _checkpoints;
     private bool _pendingLoad;
@@ -250,6 +251,15 @@ public class TigerMothPlugin : BaseUnityPlugin
             }
 
             Logger.LogInfo("TigerMoth found MothController");
+
+            // Create ghost moth — build from scratch, sprites only
+            if (_ghost == null)
+            {
+                _ghost = new GameObject("GhostMoth");
+                CopySprites(_moth.transform, _ghost.transform);
+                _ghost.transform.position = _moth.transform.position;
+                Logger.LogInfo("TigerMoth: ghost moth spawned");
+            }
         }
 
         // Apply saved state after scene reload
@@ -660,6 +670,39 @@ public class TigerMothPlugin : BaseUnityPlugin
         float size = _defaultZoom + _zoomSteps * 2f;
         Singleton<AdvancedCamera>.Instance.targetSize = size;
         Camera.main.orthographicSize = size;
+    }
+
+    // ── Ghost moth helpers ──────────────────────────────────
+
+    private static void CopySprites(Transform src, Transform dst)
+    {
+        var sr = src.GetComponent<SpriteRenderer>();
+
+        // Only copy the moth body sprite, skip everything else
+        if (src.name != "MothBodySprite" && sr != null) return;
+
+        if (sr != null)
+        {
+            var ghostSr = dst.gameObject.AddComponent<SpriteRenderer>();
+            ghostSr.sprite = sr.sprite;
+            ghostSr.sortingLayerID = sr.sortingLayerID;
+            ghostSr.sortingOrder = sr.sortingOrder;
+            ghostSr.flipX = sr.flipX;
+            ghostSr.flipY = sr.flipY;
+            var c = sr.color;
+            c.a = 0.4f;
+            ghostSr.color = c;
+        }
+
+        foreach (Transform child in src)
+        {
+            var ghostChild = new GameObject(child.name);
+            ghostChild.transform.SetParent(dst, false);
+            ghostChild.transform.localPosition = child.localPosition;
+            ghostChild.transform.localRotation = child.localRotation;
+            ghostChild.transform.localScale = child.localScale;
+            CopySprites(child, ghostChild.transform);
+        }
     }
 
     // ── Hardcoded checkpoints ─────────────────────────────
