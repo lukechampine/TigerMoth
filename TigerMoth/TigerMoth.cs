@@ -471,24 +471,20 @@ public class TigerMothPlugin : BaseUnityPlugin
             return;
         }
 
-        float rawTime = _managedSplits[_currentSplitIndex].Lock();
+        float totalTime = _managedSplits[_currentSplitIndex].Lock();
         float segmentTime;
-        float totalTime;
         if (_practiceMode)
         {
-            // In practice mode splits tick from 0, so rawTime IS the segment
-            segmentTime = rawTime;
-            float prevTotal = _currentSplitIndex > 0 ? _displayTotalTimes[_currentSplitIndex - 1] : 0f;
-            totalTime = prevTotal + segmentTime;
+            // In practice mode splits tick from 0, so totalTime IS the segment
+            segmentTime = totalTime;
         }
         else
         {
-            totalTime = rawTime;
             segmentTime = _currentSplitIndex == 0
                 ? totalTime
                 : totalTime - _runTotals[_currentSplitIndex - 1];
         }
-        _runTotals[_currentSplitIndex] = rawTime;
+        _runTotals[_currentSplitIndex] = totalTime;
 
         bool isGold = UpdateBestSegment(_currentSplitIndex, segmentTime);
 
@@ -860,13 +856,15 @@ public class TigerMothPlugin : BaseUnityPlugin
         const float deltaW = 140f;
         const float segW = 130f;
         const float totalW = 130f;
-        const float tableW = nameW + deltaW + segW + totalW;
         const float rowH = 46f;
         const float timerH = 60f;
         const float timerGap = 8f;
-        const float infoH = 36f;
         const float pad = 6f;
 
+        float tableW = _practiceMode
+            ? nameW + deltaW + segW
+            : nameW + deltaW + segW + totalW;
+        const float infoH = 36f;
         float headerH = _practiceMode ? rowH : 0f;
         bool hasGolds = _bestSegmentsSnapshot != null
             && _bestSegmentsSnapshot.Length >= SplitNames.Length;
@@ -890,37 +888,15 @@ public class TigerMothPlugin : BaseUnityPlugin
             cy += rowH;
         }
 
-        // In practice mode, use gold cumulative totals as reference
-        // In normal mode, use PB totals
-        float[] refTotals = null;
-        float[] refSegs = null;
-        if (_practiceMode && hasGolds)
-        {
-            refTotals = new float[SplitNames.Length];
-            refSegs = new float[SplitNames.Length];
-            float sum = 0f;
-            for (int i = 0; i < SplitNames.Length; i++)
-            {
-                refSegs[i] = _bestSegmentsSnapshot[i];
-                sum += _bestSegmentsSnapshot[i];
-                refTotals[i] = sum;
-            }
-        }
-        else if (!_practiceMode && _pbTotalTimes != null)
-        {
-            refTotals = _pbTotalTimes;
-            refSegs = new float[SplitNames.Length];
-            for (int i = 0; i < SplitNames.Length; i++)
-                refSegs[i] = i == 0 ? _pbTotalTimes[0]
-                    : _pbTotalTimes[i] - _pbTotalTimes[i - 1];
-        }
-        bool hasRef = refTotals != null;
-
         // ── Split rows (static — no ticking inline) ──
         for (int i = 0; i < SplitNames.Length; i++)
         {
             float rowY = cy + i * rowH;
             float colX = cx;
+            bool hasGold = _bestSegmentsSnapshot != null && i < _bestSegmentsSnapshot.Length
+                && _bestSegmentsSnapshot[i] > 0;
+            bool hasPb = _pbTotalTimes != null && i < _pbTotalTimes.Length
+                && _pbTotalTimes[i] > 0;
             bool locked = _splitLocked != null && i < _splitLocked.Length
                 && _splitLocked[i];
             bool isSkipped = _practiceMode && i <= _practiceSkipIndex;
@@ -935,46 +911,80 @@ public class TigerMothPlugin : BaseUnityPlugin
 
             if (isSkipped && !locked)
             {
-                // Skipped/prior splits in practice mode — show "--"
+                // Skipped/prior splits in practice mode
                 colX += deltaW;
                 GUI.Label(new Rect(colX, rowY, segW, rowH), "--", _splitTimeStyle);
-                colX += segW;
-                GUI.Label(new Rect(colX, rowY, totalW, rowH), "--", _splitTimeStyle);
             }
             else if (locked)
             {
-                // Completed split — delta vs reference, actual times
-                if (hasRef)
-                    DrawDelta(colX, rowY, deltaW, rowH,
-                        _displayTotalTimes[i] - refTotals[i],
-                        _splitIsGold != null && _splitIsGold[i]);
-                colX += deltaW;
-                GUI.Label(new Rect(colX, rowY, segW, rowH),
-                    FormatTime(_displaySegTimes[i]), _splitTimeStyle);
-                colX += segW;
-                GUI.Label(new Rect(colX, rowY, totalW, rowH),
-                    FormatTime(_displayTotalTimes[i]), _splitTimeStyle);
+                // Completed split — show actual delta + times
+                if (_practiceMode)
+                {
+                    if (hasGold)
+                        DrawDelta(colX, rowY, deltaW, rowH,
+                            _displaySegTimes[i] - _bestSegmentsSnapshot[i],
+                            _splitIsGold != null && _splitIsGold[i]);
+                    colX += deltaW;
+                    GUI.Label(new Rect(colX, rowY, segW, rowH),
+                        FormatTime(_displaySegTimes[i]), _splitTimeStyle);
+                }
+                else
+                {
+                    if (hasPb)
+                        DrawDelta(colX, rowY, deltaW, rowH,
+                            _displayTotalTimes[i] - _pbTotalTimes[i],
+                            _splitIsGold != null && _splitIsGold[i]);
+                    colX += deltaW;
+                    GUI.Label(new Rect(colX, rowY, segW, rowH),
+                        FormatTime(_displaySegTimes[i]), _splitTimeStyle);
+                    colX += segW;
+                    GUI.Label(new Rect(colX, rowY, totalW, rowH),
+                        FormatTime(_displayTotalTimes[i]), _splitTimeStyle);
+                }
             }
             else
             {
-                // Future/active split — show reference values in gray
+                // Future/active split — show PB values in gray, or "--"
+                // For the active split, show live delta when within 5s of PB
                 bool isActive = i == _currentSplitIndex && i < _managedSplits.Count
                     && _managedSplits[i] != null;
                 float liveTime = isActive
                     ? (float)_splitTimeValueField.GetValue(_managedSplits[i]) : 0f;
 
-                if (isActive && hasRef && liveTime >= refTotals[i] - 5f)
-                    DrawDelta(colX, rowY, deltaW, rowH, liveTime - refTotals[i], false, true);
-                colX += deltaW;
+                if (_practiceMode)
+                {
+                    float goldSeg = hasGold ? _bestSegmentsSnapshot[i] : 0f;
+                    if (isActive && hasGold && liveTime >= goldSeg - 5f)
+                        DrawDelta(colX, rowY, deltaW, rowH, liveTime - goldSeg, false, true);
+                    colX += deltaW;
 
-                var orig = GUI.color;
-                GUI.color = ColorGray;
-                GUI.Label(new Rect(colX, rowY, segW, rowH),
-                    hasRef ? FormatTime(refSegs[i]) : "--", _splitTimeStyle);
-                colX += segW;
-                GUI.Label(new Rect(colX, rowY, totalW, rowH),
-                    hasRef ? FormatTime(refTotals[i]) : "--", _splitTimeStyle);
-                GUI.color = orig;
+                    var orig = GUI.color;
+                    GUI.color = ColorGray;
+                    GUI.Label(new Rect(colX, rowY, segW, rowH),
+                        hasGold ? FormatTime(goldSeg) : "--", _splitTimeStyle);
+                    GUI.color = orig;
+                }
+                else
+                {
+                    float pbTotal = hasPb ? _pbTotalTimes[i] : 0f;
+                    if (isActive && hasPb && liveTime >= pbTotal - 5f)
+                        DrawDelta(colX, rowY, deltaW, rowH, liveTime - pbTotal, false, true);
+                    colX += deltaW;
+
+                    float pbSeg = 0f;
+                    if (hasPb)
+                        pbSeg = i == 0 ? _pbTotalTimes[0]
+                            : _pbTotalTimes[i] - _pbTotalTimes[i - 1];
+
+                    var orig = GUI.color;
+                    GUI.color = ColorGray;
+                    GUI.Label(new Rect(colX, rowY, segW, rowH),
+                        hasPb ? FormatTime(pbSeg) : "--", _splitTimeStyle);
+                    colX += segW;
+                    GUI.Label(new Rect(colX, rowY, totalW, rowH),
+                        hasPb ? FormatTime(pbTotal) : "--", _splitTimeStyle);
+                    GUI.color = orig;
+                }
             }
         }
 
@@ -990,7 +1000,10 @@ public class TigerMothPlugin : BaseUnityPlugin
         }
         else if (_currentSplitIndex >= SplitNames.Length && _displayTotalTimes != null)
         {
-            float finalTime = _displayTotalTimes[SplitNames.Length - 1];
+            // Run finished — show final time
+            float finalTime = _practiceMode
+                ? _displaySegTimes[SplitNames.Length - 1]
+                : _displayTotalTimes[SplitNames.Length - 1];
             GUI.Label(new Rect(cx, timerY, tableW, timerH),
                 FormatTime(finalTime), _timerStyle);
         }
@@ -1002,11 +1015,11 @@ public class TigerMothPlugin : BaseUnityPlugin
             for (int i = 0; i < SplitNames.Length; i++)
                 bpt += _bestSegmentsSnapshot[i];
             float bptY = timerY + timerH;
-            var orig2 = GUI.color;
+            var orig = GUI.color;
             GUI.color = ColorGray;
             GUI.Label(new Rect(cx, bptY, tableW, infoH), "Best Possible Time", _infoStyle);
             GUI.Label(new Rect(cx, bptY, tableW, infoH), FormatTime(bpt), _splitTimeStyle);
-            GUI.color = orig2;
+            GUI.color = orig;
         }
     }
 
