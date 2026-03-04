@@ -37,7 +37,7 @@ public class TigerMothPlugin : BaseUnityPlugin
     }
 
     private static readonly KeyCode[] CpKeys =
-        { KeyCode.Alpha1, KeyCode.Alpha2, KeyCode.Alpha3, KeyCode.Alpha4 };
+        { KeyCode.Alpha2, KeyCode.Alpha3, KeyCode.Alpha4, KeyCode.Alpha5 };
 
     private static readonly KeyCode[] DumpKeys =
         { KeyCode.Alpha7, KeyCode.Alpha8, KeyCode.Alpha9, KeyCode.Alpha0 };
@@ -304,7 +304,8 @@ public class TigerMothPlugin : BaseUnityPlugin
                 LeanTween.cancel(mask);
                 mask.transform.localScale = Vector3.one * 10000f;
             }
-            ApplyState();
+            if (_savedState != null)
+                ApplyState();
             return;
         }
 
@@ -360,8 +361,17 @@ public class TigerMothPlugin : BaseUnityPlugin
             }
         }
 
-        // Checkpoints: 1,2,3,4 → load hardcoded checkpoints
-        for (int i = 0; i < 4; i++)
+        // Checkpoint 1: reload scene at game start (practice first split)
+        if (Input.GetKeyDown(KeyCode.Alpha1))
+        {
+            _savedState = null;
+            _practiceMode = true;
+            _practiceSkipIndex = -1;
+            ReloadAndRestore();
+        }
+
+        // Checkpoints: 2,3,4,5 → load hardcoded checkpoints
+        for (int i = 0; i < CpKeys.Length; i++)
         {
             if (Input.GetKeyDown(CpKeys[i]))
             {
@@ -518,9 +528,18 @@ public class TigerMothPlugin : BaseUnityPlugin
 
         if (_practiceMode)
         {
-            // Practice: ghost hidden until a split starts with gold data
+            // Practice: start gold ghost for first active split
             _ghostActivePlayback = null;
             if (_ghost != null) _ghost.SetActive(false);
+            int firstSplit = _practiceSkipIndex < 0 ? 0 : _practiceSkipIndex + 1;
+            if (_goldGhostFrames != null
+                && firstSplit < _goldGhostFrames.Length
+                && _goldGhostFrames[firstSplit] != null)
+            {
+                _ghostActivePlayback = _goldGhostFrames[firstSplit];
+                _ghostPlaybackIndex = 0;
+                if (_ghost != null) _ghost.SetActive(true);
+            }
         }
         else
         {
@@ -957,7 +976,7 @@ public class TigerMothPlugin : BaseUnityPlugin
     {
         return new[]
         {
-            // 1: Before Church
+            // 2: Before Church
             new SavedState
             {
                 rbPosition = new Vector2(-13.344f, 8.546f),
@@ -970,7 +989,7 @@ public class TigerMothPlugin : BaseUnityPlugin
                 spiderCanFollow = true,
                 animStateHash = 618468143,
             },
-            // 2: Before Gift
+            // 3: Before Gift
             new SavedState
             {
                 rbPosition = new Vector2(-4.648f, 30.696f),
@@ -983,7 +1002,7 @@ public class TigerMothPlugin : BaseUnityPlugin
                 spiderCanFollow = true,
                 animStateHash = 618468143,
             },
-            // 3: Mid-Tower
+            // 4: Mid-Tower
             new SavedState
             {
                 rbPosition = new Vector2(-27.123f, 98.755f),
@@ -997,7 +1016,7 @@ public class TigerMothPlugin : BaseUnityPlugin
                 spiderCanFollow = true,
                 animStateHash = 618468143,
             },
-            // 4: Near End
+            // 5: Near End
             new SavedState
             {
                 rbPosition = new Vector2(-6.102f, 153.932f),
@@ -1099,7 +1118,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         string[][] bindings = new[] {
             new[] { "H", "Save" },
             new[] { "I", "Load" },
-            new[] { "1-4", "Checkpoints" },
+            new[] { "1-5", "Checkpoints" },
             new[] { "[", "Zoom in" },
             new[] { "]", "Zoom out" },
         };
