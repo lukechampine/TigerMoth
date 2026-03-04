@@ -70,10 +70,27 @@ public class TigerMothPlugin : BaseUnityPlugin
         public float animNormalizedTime;
     }
 
+    private struct GhostFrame
+    {
+        public float x, y;
+        public int animHash;
+        public float animTime;
+        public bool flipX;
+    }
+
     // ── Fields ────────────────────────────────────────────
     private MothController _moth;
     private Rigidbody2D _rb;
     private GameObject _ghost;
+    private Animator _ghostAnimator;
+
+    // Ghost recording / playback
+    private List<GhostFrame> _ghostRecording;
+    private int[] _ghostSegmentStarts;
+    private GhostFrame[] _ghostPlaybackFrames;   // PB ghost (full run)
+    private GhostFrame[][] _goldGhostFrames;     // per-split gold ghosts
+    private GhostFrame[] _ghostActivePlayback;   // current playback source
+    private int _ghostPlaybackIndex;
     private SavedState _savedState;
     private SavedState[] _checkpoints;
     private bool _pendingLoad;
@@ -167,6 +184,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         new Harmony("com.speedrun.tigermoth").PatchAll();
         _checkpoints = CreateCheckpoints();
         LoadPB();
+        LoadGhost();
         Logger.LogInfo("TigerMoth loaded");
     }
 
@@ -258,6 +276,18 @@ public class TigerMothPlugin : BaseUnityPlugin
                 _ghost = new GameObject("GhostMoth");
                 CopySprites(_moth.transform, _ghost.transform);
                 _ghost.transform.position = _moth.transform.position;
+
+                // Add Animator for animation playback
+                var mothAnimator = (Animator)_animatorField.GetValue(_moth);
+                if (mothAnimator != null)
+                {
+                    _ghostAnimator = _ghost.AddComponent<Animator>();
+                    _ghostAnimator.runtimeAnimatorController = mothAnimator.runtimeAnimatorController;
+                    _ghostAnimator.avatar = mothAnimator.avatar;
+                }
+
+                // Hide until a run starts with playback data
+                _ghost.SetActive(false);
                 Logger.LogInfo("TigerMoth: ghost moth spawned");
             }
         }
@@ -279,6 +309,41 @@ public class TigerMothPlugin : BaseUnityPlugin
         }
 
         ManageSplits();
+
+        // Ghost: record frame
+        if (_runActive && _ghostRecording != null)
+        {
+            var mothAnimator = (Animator)_animatorField.GetValue(_moth);
+            var info = mothAnimator != null
+                ? mothAnimator.GetCurrentAnimatorStateInfo(0)
+                : default(AnimatorStateInfo);
+            _ghostRecording.Add(new GhostFrame
+            {
+                x = _moth.transform.position.x,
+                y = _moth.transform.position.y,
+                animHash = info.fullPathHash,
+                animTime = info.normalizedTime,
+                flipX = _moth.transform.eulerAngles.y > 90f
+            });
+        }
+
+        // Ghost: playback frame
+        if (_ghost != null && _ghost.activeSelf && _ghostActivePlayback != null)
+        {
+            if (_ghostPlaybackIndex < _ghostActivePlayback.Length)
+            {
+                var f = _ghostActivePlayback[_ghostPlaybackIndex];
+                _ghost.transform.position = new Vector3(f.x, f.y, 0f);
+                _ghost.transform.eulerAngles = new Vector3(0f, f.flipX ? 180f : 0f, 0f);
+                if (_ghostAnimator != null && f.animHash != 0)
+                    _ghostAnimator.Play(f.animHash, 0, f.animTime);
+                _ghostPlaybackIndex++;
+            }
+            else
+            {
+                _ghost.SetActive(false);
+            }
+        }
 
         if (Input.GetKeyDown(KeyCode.H))
             SaveState();
@@ -337,6 +402,8 @@ public class TigerMothPlugin : BaseUnityPlugin
         _pendingLoad = true;
         _moth = null;
         _rb = null;
+        _ghost = null;
+        _ghostAnimator = null;
         _runActive = false;
         _managedSplits.Clear();
         _currentSplitIndex = -1;
@@ -362,6 +429,8 @@ public class TigerMothPlugin : BaseUnityPlugin
             _runActive = false;
             _managedSplits.Clear();
             _currentSplitIndex = -1;
+            _ghostRecording = null;
+            if (_ghost != null) _ghost.SetActive(false);
         }
 
         // Detect new run start (game created first split)
@@ -442,6 +511,24 @@ public class TigerMothPlugin : BaseUnityPlugin
             }
         }
 
+        // Ghost recording + playback
+        _ghostRecording = new List<GhostFrame>();
+        _ghostSegmentStarts = new int[SplitNames.Length];
+        _ghostPlaybackIndex = 0;
+
+        if (_practiceMode)
+        {
+            // Practice: ghost hidden until a split starts with gold data
+            _ghostActivePlayback = null;
+            if (_ghost != null) _ghost.SetActive(false);
+        }
+        else
+        {
+            // Normal run: play PB ghost
+            _ghostActivePlayback = _ghostPlaybackFrames;
+            if (_ghost != null) _ghost.SetActive(_ghostPlaybackFrames != null);
+        }
+
         Logger.LogInfo("TigerMoth: managed run started (" + SplitNames.Length + " splits)");
     }
 
@@ -472,11 +559,26 @@ public class TigerMothPlugin : BaseUnityPlugin
             Logger.LogInfo(string.Format("TigerMoth: practice skip '{0}'",
                 SplitNames[_currentSplitIndex]));
             _currentSplitIndex++;
+
+            // Mark segment start for recording
+            if (_ghostSegmentStarts != null && _currentSplitIndex < SplitNames.Length)
+                _ghostSegmentStarts[_currentSplitIndex] = _ghostRecording != null ? _ghostRecording.Count : 0;
+
             if (_currentSplitIndex < _managedSplits.Count)
             {
                 var next = _managedSplits[_currentSplitIndex];
                 _splitTimeValueField.SetValue(next, 0f);
                 _splitTickingField.SetValue(next, true);
+
+                // Start gold ghost playback for this split
+                if (_goldGhostFrames != null
+                    && _currentSplitIndex < _goldGhostFrames.Length
+                    && _goldGhostFrames[_currentSplitIndex] != null)
+                {
+                    _ghostActivePlayback = _goldGhostFrames[_currentSplitIndex];
+                    _ghostPlaybackIndex = 0;
+                    if (_ghost != null) _ghost.SetActive(true);
+                }
             }
             return;
         }
@@ -503,12 +605,21 @@ public class TigerMothPlugin : BaseUnityPlugin
         _splitLocked[_currentSplitIndex] = true;
         _splitIsGold[_currentSplitIndex] = isGold;
 
+        // Save gold ghost segment
+        if (isGold && _ghostRecording != null && _ghostSegmentStarts != null)
+            SaveGoldSegment(_currentSplitIndex,
+                _ghostSegmentStarts[_currentSplitIndex], _ghostRecording.Count);
+
         SavePB();
 
         Logger.LogInfo(string.Format("TigerMoth: split '{0}' seg={1} total={2}",
             SplitNames[_currentSplitIndex], FormatTime(segmentTime), FormatTime(totalTime)));
 
         _currentSplitIndex++;
+
+        // Mark next segment start
+        if (_ghostSegmentStarts != null && _currentSplitIndex < SplitNames.Length)
+            _ghostSegmentStarts[_currentSplitIndex] = _ghostRecording != null ? _ghostRecording.Count : 0;
 
         if (_currentSplitIndex < _managedSplits.Count)
         {
@@ -518,6 +629,16 @@ public class TigerMothPlugin : BaseUnityPlugin
             else
                 _splitTimeValueField.SetValue(next, totalTime);
             _splitTickingField.SetValue(next, true);
+
+            // Practice mode: start gold ghost playback for the new split
+            if (_practiceMode && _goldGhostFrames != null
+                && _currentSplitIndex < _goldGhostFrames.Length
+                && _goldGhostFrames[_currentSplitIndex] != null)
+            {
+                _ghostActivePlayback = _goldGhostFrames[_currentSplitIndex];
+                _ghostPlaybackIndex = 0;
+                if (_ghost != null) _ghost.SetActive(true);
+            }
         }
     }
 
@@ -554,6 +675,10 @@ public class TigerMothPlugin : BaseUnityPlugin
         _splitLocked[lastIdx] = true;
         _splitIsGold[lastIdx] = isGold;
 
+        // Save gold ghost for last segment
+        if (isGold && _ghostRecording != null && _ghostSegmentStarts != null)
+            SaveGoldSegment(lastIdx, _ghostSegmentStarts[lastIdx], _ghostRecording.Count);
+
         // Check for PB only in normal mode (practice runs skip splits)
         if (!_practiceMode)
         {
@@ -565,6 +690,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             if (complete && (_pbTotalTimes == null || totalTime < _pbTotalTimes[lastIdx]))
             {
                 _pbTotalTimes = (float[])_runTotals.Clone();
+                SaveGhost();
                 Logger.LogInfo("TigerMoth: New PB! " + FormatTime(totalTime));
             }
         }
@@ -661,6 +787,126 @@ public class TigerMothPlugin : BaseUnityPlugin
         for (int i = 0; i < values.Length; i++)
             parts[i] = values[i].ToString("F4", CultureInfo.InvariantCulture);
         return string.Join(",", parts);
+    }
+
+    // ── Ghost persistence ─────────────────────────────────
+
+    private static string GhostPath()
+    {
+        return Path.Combine(BepInEx.Paths.ConfigPath, "TigerMoth_ghost.bin");
+    }
+
+    private static string GoldGhostPath(int splitIndex)
+    {
+        return Path.Combine(BepInEx.Paths.ConfigPath, "TigerMoth_ghost_" + splitIndex + ".bin");
+    }
+
+    private static void WriteGhostFrames(string path, GhostFrame[] frames)
+    {
+        using (var fs = File.Create(path))
+        using (var w = new BinaryWriter(fs))
+        {
+            w.Write(frames.Length);
+            for (int i = 0; i < frames.Length; i++)
+            {
+                w.Write(frames[i].x);
+                w.Write(frames[i].y);
+                w.Write(frames[i].animHash);
+                w.Write(frames[i].animTime);
+                w.Write((byte)(frames[i].flipX ? 1 : 0));
+            }
+        }
+    }
+
+    private static GhostFrame[] ReadGhostFrames(string path)
+    {
+        using (var fs = File.OpenRead(path))
+        using (var r = new BinaryReader(fs))
+        {
+            int count = r.ReadInt32();
+            var frames = new GhostFrame[count];
+            for (int i = 0; i < count; i++)
+            {
+                frames[i].x = r.ReadSingle();
+                frames[i].y = r.ReadSingle();
+                frames[i].animHash = r.ReadInt32();
+                frames[i].animTime = r.ReadSingle();
+                frames[i].flipX = r.ReadByte() != 0;
+            }
+            return frames;
+        }
+    }
+
+    private void LoadGhost()
+    {
+        try
+        {
+            string path = GhostPath();
+            if (File.Exists(path))
+            {
+                _ghostPlaybackFrames = ReadGhostFrames(path);
+                Logger.LogInfo("TigerMoth: PB ghost loaded (" + _ghostPlaybackFrames.Length + " frames)");
+            }
+        }
+        catch (System.Exception e)
+        {
+            Logger.LogError("TigerMoth: failed to load PB ghost: " + e.Message);
+            _ghostPlaybackFrames = null;
+        }
+
+        _goldGhostFrames = new GhostFrame[SplitNames.Length][];
+        for (int i = 0; i < SplitNames.Length; i++)
+        {
+            try
+            {
+                string path = GoldGhostPath(i);
+                if (File.Exists(path))
+                {
+                    _goldGhostFrames[i] = ReadGhostFrames(path);
+                    Logger.LogInfo("TigerMoth: gold ghost " + i + " loaded (" + _goldGhostFrames[i].Length + " frames)");
+                }
+            }
+            catch (System.Exception e)
+            {
+                Logger.LogError("TigerMoth: failed to load gold ghost " + i + ": " + e.Message);
+            }
+        }
+    }
+
+    private void SaveGhost()
+    {
+        if (_ghostRecording == null || _ghostRecording.Count == 0)
+            return;
+        try
+        {
+            var frames = _ghostRecording.ToArray();
+            WriteGhostFrames(GhostPath(), frames);
+            _ghostPlaybackFrames = frames;
+            Logger.LogInfo("TigerMoth: PB ghost saved (" + frames.Length + " frames)");
+        }
+        catch (System.Exception e)
+        {
+            Logger.LogError("TigerMoth: failed to save PB ghost: " + e.Message);
+        }
+    }
+
+    private void SaveGoldSegment(int splitIndex, int startFrame, int endFrame)
+    {
+        if (_ghostRecording == null || startFrame >= endFrame)
+            return;
+        try
+        {
+            int count = endFrame - startFrame;
+            var frames = new GhostFrame[count];
+            _ghostRecording.CopyTo(startFrame, frames, 0, count);
+            WriteGhostFrames(GoldGhostPath(splitIndex), frames);
+            _goldGhostFrames[splitIndex] = frames;
+            Logger.LogInfo("TigerMoth: gold ghost " + splitIndex + " saved (" + count + " frames)");
+        }
+        catch (System.Exception e)
+        {
+            Logger.LogError("TigerMoth: failed to save gold ghost " + splitIndex + ": " + e.Message);
+        }
     }
 
     // ── Camera zoom ───────────────────────────────────────
