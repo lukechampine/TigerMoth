@@ -782,7 +782,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             _panelBgStyle.normal.background = _panelBgTex;
 
             _splitActiveTex = new Texture2D(1, 1);
-            _splitActiveTex.SetPixel(0, 0, new Color(1f, 1f, 1f, 0.08f));
+            _splitActiveTex.SetPixel(0, 0, new Color(1f, 1f, 1f, 0.2f));
             _splitActiveTex.Apply();
             _splitActiveStyle = new GUIStyle();
             _splitActiveStyle.normal.background = _splitActiveTex;
@@ -853,7 +853,8 @@ public class TigerMothPlugin : BaseUnityPlugin
     private void DrawSplitTable()
     {
         const float nameW = 140f;
-        const float deltaW = 140f;
+        const float deltaWNormal = 140f;
+        const float deltaWPractice = 160f;
         const float segW = 130f;
         const float totalW = 130f;
         const float rowH = 46f;
@@ -861,6 +862,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         const float timerGap = 8f;
         const float pad = 6f;
 
+        float deltaW = _practiceMode ? deltaWPractice : deltaWNormal;
         float tableW = _practiceMode
             ? nameW + deltaW + segW
             : nameW + deltaW + segW + totalW;
@@ -911,9 +913,13 @@ public class TigerMothPlugin : BaseUnityPlugin
 
             if (isSkipped && !locked)
             {
-                // Skipped/prior splits in practice mode
+                // Skipped/prior splits in practice mode — show gold times in gray
                 colX += deltaW;
-                GUI.Label(new Rect(colX, rowY, segW, rowH), "--", _splitTimeStyle);
+                var orig = GUI.color;
+                GUI.color = ColorGray;
+                GUI.Label(new Rect(colX, rowY, segW, rowH),
+                    hasGold ? FormatTime(_bestSegmentsSnapshot[i]) : "--", _splitTimeStyle);
+                GUI.color = orig;
             }
             else if (locked)
             {
