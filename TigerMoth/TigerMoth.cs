@@ -34,6 +34,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         }
     }
 
+
     // ── Harmony: capture EndRun for final split ───────────
     [HarmonyPatch(typeof(SpeedrunSplits), "EndRun")]
     private class PatchEndRun
@@ -154,8 +155,7 @@ public class TigerMothPlugin : BaseUnityPlugin
     private bool _practiceMode;
     private int _practiceSkipIndex;
 
-    // Camera zoom
-    private float _defaultZoom;
+    // Camera zoom (offset applied via Harmony patch on AdvancedCamera.Update)
     private int _zoomSteps;
 
     // Personal best / gold tracking
@@ -227,14 +227,10 @@ public class TigerMothPlugin : BaseUnityPlugin
             if (rbField != null)
                 _rb = (Rigidbody2D)rbField.GetValue(_moth);
 
-            if (Camera.main != null)
+            if (!_pendingLoad)
             {
-                _defaultZoom = Camera.main.orthographicSize;
-                if (!_pendingLoad)
-                {
-                    _zoomSteps = 0;
-                    _practiceMode = false;
-                }
+                _zoomSteps = 0;
+                _practiceMode = false;
             }
 
             _splitsRunningField = typeof(SpeedrunSplits).GetField("running", flags);
@@ -410,16 +406,19 @@ public class TigerMothPlugin : BaseUnityPlugin
         }
 
         if (Input.GetKeyDown(KeyCode.LeftBracket))
-        {
             _zoomSteps--;
-            ApplyZoom();
-        }
 
         if (Input.GetKeyDown(KeyCode.RightBracket))
-        {
             _zoomSteps++;
-            ApplyZoom();
-        }
+    }
+
+    void LateUpdate()
+    {
+        if (_zoomSteps == 0 || Camera.main == null) return;
+        var cam = Singleton<AdvancedCamera>.Instance;
+        if (cam == null) return;
+
+        Camera.main.orthographicSize = cam.targetSize + _zoomSteps * 2f;
     }
 
     // ── Helpers ─────────────────────────────────────────
@@ -942,12 +941,6 @@ public class TigerMothPlugin : BaseUnityPlugin
 
     // ── Camera zoom ───────────────────────────────────────
 
-    private void ApplyZoom()
-    {
-        float size = _defaultZoom + _zoomSteps * 2f;
-        Singleton<AdvancedCamera>.Instance.targetSize = size;
-        Camera.main.orthographicSize = size;
-    }
 
     // ── Ghost moth helpers ──────────────────────────────────
 
@@ -1513,9 +1506,8 @@ public class TigerMothPlugin : BaseUnityPlugin
 
         // Restore camera position and zoom
         var cam = Singleton<AdvancedCamera>.Instance;
-        float zoom = _savedState.cameraTargetSize + _zoomSteps * 2f;
-        cam.targetSize = zoom;
-        Camera.main.orthographicSize = zoom;
+        cam.targetSize = _savedState.cameraTargetSize;
+        Camera.main.orthographicSize = _savedState.cameraTargetSize;
         cam.transform.position = _savedState.cameraPosition;
         if (_pureTransformField != null)
         {
