@@ -91,6 +91,7 @@ public class TigerMothPlugin : BaseUnityPlugin
     private GhostFrame[][] _goldGhostFrames;     // per-split gold ghosts
     private GhostFrame[] _ghostActivePlayback;   // current playback source
     private int _ghostPlaybackIndex;
+    private bool _ghostEnabled = true;
     private SavedState _savedState;
     private SavedState[] _checkpoints;
     private bool _pendingLoad;
@@ -328,22 +329,22 @@ public class TigerMothPlugin : BaseUnityPlugin
             });
         }
 
-        // Ghost: playback frame
-        if (_ghost != null && _ghost.activeSelf && _ghostActivePlayback != null)
+        // Ghost: playback frame (always advance index to stay in sync)
+        if (_ghostActivePlayback != null && _ghostPlaybackIndex < _ghostActivePlayback.Length)
         {
-            if (_ghostPlaybackIndex < _ghostActivePlayback.Length)
+            if (_ghost != null && _ghostEnabled)
             {
                 var f = _ghostActivePlayback[_ghostPlaybackIndex];
                 _ghost.transform.position = new Vector3(f.x, f.y, 0f);
                 _ghost.transform.eulerAngles = new Vector3(0f, f.flipX ? 180f : 0f, 0f);
                 if (_ghostAnimator != null && f.animHash != 0)
                     _ghostAnimator.Play(f.animHash, 0, f.animTime);
-                _ghostPlaybackIndex++;
             }
-            else
-            {
-                _ghost.SetActive(false);
-            }
+            _ghostPlaybackIndex++;
+        }
+        else if (_ghost != null && _ghost.activeSelf && _ghostActivePlayback != null)
+        {
+            _ghost.SetActive(false);
         }
 
         if (Input.GetKeyDown(KeyCode.H))
@@ -389,6 +390,18 @@ public class TigerMothPlugin : BaseUnityPlugin
             {
                 SaveState();
                 DumpStateJson(i + 1);
+            }
+        }
+
+        if (Input.GetKeyDown(KeyCode.G))
+        {
+            _ghostEnabled = !_ghostEnabled;
+            if (_ghost != null)
+            {
+                if (!_ghostEnabled)
+                    _ghost.SetActive(false);
+                else if (_ghostActivePlayback != null && _ghostPlaybackIndex < _ghostActivePlayback.Length)
+                    _ghost.SetActive(true);
             }
         }
 
@@ -538,14 +551,14 @@ public class TigerMothPlugin : BaseUnityPlugin
             {
                 _ghostActivePlayback = _goldGhostFrames[firstSplit];
                 _ghostPlaybackIndex = 0;
-                if (_ghost != null) _ghost.SetActive(true);
+                if (_ghost != null && _ghostEnabled) _ghost.SetActive(true);
             }
         }
         else
         {
             // Normal run: play PB ghost
             _ghostActivePlayback = _ghostPlaybackFrames;
-            if (_ghost != null) _ghost.SetActive(_ghostPlaybackFrames != null);
+            if (_ghost != null) _ghost.SetActive(_ghostEnabled && _ghostPlaybackFrames != null);
         }
 
         Logger.LogInfo("TigerMoth: managed run started (" + SplitNames.Length + " splits)");
@@ -596,7 +609,7 @@ public class TigerMothPlugin : BaseUnityPlugin
                 {
                     _ghostActivePlayback = _goldGhostFrames[_currentSplitIndex];
                     _ghostPlaybackIndex = 0;
-                    if (_ghost != null) _ghost.SetActive(true);
+                    if (_ghost != null && _ghostEnabled) _ghost.SetActive(true);
                 }
             }
             return;
@@ -656,7 +669,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             {
                 _ghostActivePlayback = _goldGhostFrames[_currentSplitIndex];
                 _ghostPlaybackIndex = 0;
-                if (_ghost != null) _ghost.SetActive(true);
+                if (_ghost != null && _ghostEnabled) _ghost.SetActive(true);
             }
         }
     }
@@ -1119,6 +1132,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             new[] { "H", "Save" },
             new[] { "I", "Load" },
             new[] { "1-5", "Checkpoints" },
+            new[] { "G", "Ghost" },
             new[] { "[", "Zoom in" },
             new[] { "]", "Zoom out" },
         };
@@ -1177,7 +1191,8 @@ public class TigerMothPlugin : BaseUnityPlugin
         const float infoH = 36f;
         float headerH = _practiceMode ? rowH : 0f;
         bool hasGolds = _bestSegmentsSnapshot != null
-            && _bestSegmentsSnapshot.Length >= SplitNames.Length;
+            && _bestSegmentsSnapshot.Length >= SplitNames.Length
+            && System.Array.TrueForAll(_bestSegmentsSnapshot, s => s > 0f);
         float tableH = headerH + SplitNames.Length * rowH + timerGap + timerH
             + (hasGolds ? infoH : 0f);
 
