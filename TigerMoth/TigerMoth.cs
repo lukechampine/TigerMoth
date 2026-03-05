@@ -48,8 +48,6 @@ public class TigerMothPlugin : BaseUnityPlugin
     private static readonly KeyCode[] CpKeys =
         { KeyCode.Alpha2, KeyCode.Alpha3, KeyCode.Alpha4, KeyCode.Alpha5 };
 
-    private static readonly KeyCode[] DumpKeys =
-        { KeyCode.Alpha7, KeyCode.Alpha8, KeyCode.Alpha9, KeyCode.Alpha0 };
 
     // ── Saved state ───────────────────────────────────────
     private class SavedState
@@ -398,15 +396,6 @@ public class TigerMothPlugin : BaseUnityPlugin
             }
         }
 
-        // Dump state: 7,8,9,0 → write JSON to plugins/TigerMoth/
-        for (int i = 0; i < 4; i++)
-        {
-            if (Input.GetKeyDown(DumpKeys[i]))
-            {
-                SaveState();
-                DumpStateJson(i + 1);
-            }
-        }
 
         if (Input.GetKeyDown(KeyCode.G))
         {
@@ -1418,54 +1407,6 @@ public class TigerMothPlugin : BaseUnityPlugin
             _savedState.rbPosition.x, _savedState.rbPosition.y, _currentSplitIndex));
     }
 
-    private void DumpStateJson(int slot)
-    {
-        if (_savedState == null)
-            return;
-
-        var s = _savedState;
-        var ci = CultureInfo.InvariantCulture;
-        string json = string.Format(ci,
-@"{{
-  ""rbPosition"": [{0}, {1}],
-  ""rbVelocity"": [{2}, {3}],
-  ""jumps"": {4},
-  ""chargingTime"": {5},
-  ""facingDirection"": {6},
-  ""jumpCanceled"": {7},
-  ""hitstopActive"": {8},
-  ""queuedJump"": {9},
-  ""velocityBeforeHitstop"": [{10}, {11}],
-  ""currentSplitIndex"": {12},
-  ""extraJumpUsed"": {13},
-  ""cameraTargetSize"": {14},
-  ""cameraPosition"": [{15}, {16}, {17}],
-  ""spiderPosition"": [{18}, {19}, {20}],
-  ""spiderCanFollow"": {21},
-  ""animStateHash"": {22},
-  ""animNormalizedTime"": {23}
-}}",
-            s.rbPosition.x, s.rbPosition.y,
-            s.rbVelocity.x, s.rbVelocity.y,
-            s.jumps, s.chargingTime, s.facingDirection,
-            s.jumpCanceled.ToString().ToLower(),
-            s.hitstopActive.ToString().ToLower(),
-            s.queuedJump.ToString().ToLower(),
-            s.velocityBeforeHitstop.x, s.velocityBeforeHitstop.y,
-            s.currentSplitIndex,
-            s.extraJumpUsed.ToString().ToLower(),
-            s.cameraTargetSize,
-            s.cameraPosition.x, s.cameraPosition.y, s.cameraPosition.z,
-            s.spiderPosition.x, s.spiderPosition.y, s.spiderPosition.z,
-            s.spiderCanFollow.ToString().ToLower(),
-            s.animStateHash, s.animNormalizedTime);
-
-        string dir = Path.Combine(BepInEx.Paths.PluginPath, "TigerMoth");
-        Directory.CreateDirectory(dir);
-        string path = Path.Combine(dir, "checkpoint" + slot + ".json");
-        File.WriteAllText(path, json);
-        Logger.LogInfo("TigerMoth: dumped state to " + path);
-    }
 
     private void ApplyState()
     {
