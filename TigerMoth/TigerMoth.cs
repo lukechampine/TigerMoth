@@ -155,6 +155,7 @@ public class TigerMothPlugin : BaseUnityPlugin
     private float[] _pbTotalTimes;
     private float[] _bestSegments;
     private float[] _bestSegmentsSnapshot; // frozen at run start for display deltas
+    private float[] _pbSnapshot;           // frozen at run start for display deltas
     private float[] _runTotals;
 
     // Display data (read by OnGUI)
@@ -504,6 +505,8 @@ public class TigerMothPlugin : BaseUnityPlugin
         _splitIsGold = new bool[SplitNames.Length];
         _bestSegmentsSnapshot = _bestSegments != null
             ? (float[])_bestSegments.Clone() : null;
+        _pbSnapshot = _pbTotalTimes != null
+            ? (float[])_pbTotalTimes.Clone() : null;
 
         // Destroy the game's split — we create all of ours from scratch
         Object.Destroy(gameSplits[0].gameObject);
@@ -1220,8 +1223,8 @@ public class TigerMothPlugin : BaseUnityPlugin
             float colX = cx;
             bool hasGold = _bestSegmentsSnapshot != null && i < _bestSegmentsSnapshot.Length
                 && _bestSegmentsSnapshot[i] > 0;
-            bool hasPb = _pbTotalTimes != null && i < _pbTotalTimes.Length
-                && _pbTotalTimes[i] > 0;
+            bool hasPb = _pbSnapshot != null && i < _pbSnapshot.Length
+                && _pbSnapshot[i] > 0;
             bool locked = _splitLocked != null && i < _splitLocked.Length
                 && _splitLocked[i];
             bool isSkipped = _practiceMode && i <= _practiceSkipIndex;
@@ -1261,7 +1264,7 @@ public class TigerMothPlugin : BaseUnityPlugin
                 {
                     if (hasPb)
                         DrawDelta(colX, rowY, deltaW, rowH,
-                            _displayTotalTimes[i] - _pbTotalTimes[i],
+                            _displayTotalTimes[i] - _pbSnapshot[i],
                             _splitIsGold != null && _splitIsGold[i]);
                     colX += deltaW;
                     GUI.Label(new Rect(colX, rowY, segW, rowH),
@@ -1295,15 +1298,15 @@ public class TigerMothPlugin : BaseUnityPlugin
                 }
                 else
                 {
-                    float pbTotal = hasPb ? _pbTotalTimes[i] : 0f;
+                    float pbTotal = hasPb ? _pbSnapshot[i] : 0f;
                     if (isActive && hasPb && liveTime >= pbTotal - 5f)
                         DrawDelta(colX, rowY, deltaW, rowH, liveTime - pbTotal, false, true);
                     colX += deltaW;
 
                     float pbSeg = 0f;
                     if (hasPb)
-                        pbSeg = i == 0 ? _pbTotalTimes[0]
-                            : _pbTotalTimes[i] - _pbTotalTimes[i - 1];
+                        pbSeg = i == 0 ? _pbSnapshot[0]
+                            : _pbSnapshot[i] - _pbSnapshot[i - 1];
 
                     var orig = GUI.color;
                     GUI.color = ColorGray;
