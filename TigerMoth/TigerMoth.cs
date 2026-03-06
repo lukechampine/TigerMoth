@@ -372,6 +372,28 @@ public class TigerMothPlugin : BaseUnityPlugin
 
         ManageSplits();
 
+        // Checkpoints (must be checked before replay block which returns early)
+        if (Input.GetKeyDown(KeyCode.Alpha1))
+        {
+            _savedState = null;
+            _practiceMode = true;
+            _practiceSkipIndex = -1;
+            ReloadAndRestore();
+            return;
+        }
+
+        for (int i = 0; i < CpKeys.Length; i++)
+        {
+            if (Input.GetKeyDown(CpKeys[i]))
+            {
+                _savedState = _checkpoints[i];
+                _practiceMode = true;
+                _practiceSkipIndex = _savedState.currentSplitIndex;
+                ReloadAndRestore();
+                return;
+            }
+        }
+
         // Replay mode: drive moth from recorded frames
         if (_replayActive)
         {
@@ -475,26 +497,6 @@ public class TigerMothPlugin : BaseUnityPlugin
             }
         }
 
-        // Checkpoint 1: reload scene at game start (practice first split)
-        if (Input.GetKeyDown(KeyCode.Alpha1))
-        {
-            _savedState = null;
-            _practiceMode = true;
-            _practiceSkipIndex = -1;
-            ReloadAndRestore();
-        }
-
-        // Checkpoints: 2,3,4,5 → load hardcoded checkpoints
-        for (int i = 0; i < CpKeys.Length; i++)
-        {
-            if (Input.GetKeyDown(CpKeys[i]))
-            {
-                _savedState = _checkpoints[i];
-                _practiceMode = true;
-                _practiceSkipIndex = _savedState.currentSplitIndex;
-                ReloadAndRestore();
-            }
-        }
 
 
         if (Input.GetKeyDown(KeyCode.F))
