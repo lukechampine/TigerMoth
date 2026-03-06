@@ -458,7 +458,12 @@ public class TigerMothPlugin : BaseUnityPlugin
         {
             _bestPossibleTime = 0f;
             for (int i = 0; i < SplitNames.Length; i++)
-                _bestPossibleTime += _bestSegmentsSnapshot[i];
+            {
+                if (!_practiceMode && _splitLocked != null && i < _splitLocked.Length && _splitLocked[i])
+                    _bestPossibleTime += _displaySegTimes[i];
+                else
+                    _bestPossibleTime += _bestSegmentsSnapshot[i];
+            }
         }
     }
 
@@ -497,6 +502,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             SaveGoldSegment(idx, _ghostSegmentStarts[idx], _ghostRecording.Count);
 
         SavePB();
+        UpdateCachedGolds();
 
         Logger.LogInfo(string.Format("TigerMoth: split '{0}' seg={1} total={2}",
             SplitNames[idx], FormatTime(segmentTime), FormatTime(totalTime)));
@@ -1327,11 +1333,9 @@ public class TigerMothPlugin : BaseUnityPlugin
         if (_hasGolds)
         {
             float bptY = timerY + timerH;
-            var orig = GUI.color;
-            GUI.color = ColorGray;
-            GUI.Label(new Rect(cx, bptY, tableW, infoH), "Best Possible Time", _infoStyle);
+            string bptLabel = _practiceMode ? "Sum of Best" : "Best Possible Time";
+            GUI.Label(new Rect(cx, bptY, tableW, infoH), bptLabel, _splitNameStyle);
             GUI.Label(new Rect(cx, bptY, tableW, infoH), FormatTime(_bestPossibleTime), _splitTimeStyle);
-            GUI.color = orig;
         }
     }
 
