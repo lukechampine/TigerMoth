@@ -25,6 +25,22 @@ public class TigerMothPlugin : BaseUnityPlugin
     private static TigerMothPlugin _instance;
 
     // ── Harmony: block game's NewSplit after we take over ─
+    // ── Harmony: reset our state when game starts a new run ─
+    [HarmonyPatch(typeof(SpeedrunSplits), "StartRun")]
+    private class PatchStartRun
+    {
+        static void Prefix()
+        {
+            if (_instance == null) return;
+            _instance._replayActive = false;
+            _instance._replayFrames = null;
+            _instance._runActive = false;
+            _instance._managedSplits.Clear();
+            _instance._currentSplitIndex = -1;
+            _instance._ghostRecording = null;
+        }
+    }
+
     [HarmonyPatch(typeof(SpeedrunSplits), "NewSplit")]
     private class PatchNewSplit
     {
@@ -38,6 +54,16 @@ public class TigerMothPlugin : BaseUnityPlugin
     // ── Harmony: skip moth update during replay ───────────
     [HarmonyPatch(typeof(MothController), "Update")]
     private class PatchMothUpdate
+    {
+        static bool Prefix()
+        {
+            return _instance == null || !_instance._replayActive;
+        }
+    }
+
+    // ── Harmony: skip powerup pickup during replay ────────
+    [HarmonyPatch(typeof(ExtraJump), "OnTriggerEnter2D")]
+    private class PatchExtraJumpTrigger
     {
         static bool Prefix()
         {
@@ -250,6 +276,12 @@ public class TigerMothPlugin : BaseUnityPlugin
             {
                 _zoomSteps = 0;
                 _practiceMode = false;
+                _replayActive = false;
+                _replayFrames = null;
+                _runActive = false;
+                _managedSplits.Clear();
+                _currentSplitIndex = -1;
+                _ghostRecording = null;
             }
 
             _splitsRunningField = typeof(SpeedrunSplits).GetField("running", flags);
