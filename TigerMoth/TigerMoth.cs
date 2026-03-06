@@ -84,7 +84,13 @@ public class TigerMothPlugin : BaseUnityPlugin
         public int animHash;
         public float animTime;
         public bool flipX;
+        public byte keys; // bitmask: 1=left, 2=right, 4=up, 8=down
     }
+
+    private const byte KeyLeft = 1;
+    private const byte KeyRight = 2;
+    private const byte KeyUp = 4;
+    private const byte KeyDown = 8;
 
     // ── Fields ────────────────────────────────────────────
     private MothController _moth;
@@ -328,13 +334,23 @@ public class TigerMothPlugin : BaseUnityPlugin
             var info = mothAnimator != null
                 ? mothAnimator.GetCurrentAnimatorStateInfo(0)
                 : default(AnimatorStateInfo);
+            var controls = InputManager.controls;
+            float h = controls != null ? controls.GetAxis("LookHorizontal") : 0f;
+            float v = controls != null ? controls.GetAxis("LookVertical") : 0f;
+            byte keys = 0;
+            if (h < 0f) keys |= KeyLeft;
+            if (h > 0f) keys |= KeyRight;
+            if (v > 0f) keys |= KeyUp;
+            if (v < 0f) keys |= KeyDown;
+
             _ghostRecording.Add(new GhostFrame
             {
                 x = _moth.transform.position.x,
                 y = _moth.transform.position.y,
                 animHash = info.fullPathHash,
                 animTime = info.normalizedTime,
-                flipX = _moth.transform.eulerAngles.y > 90f
+                flipX = _moth.transform.eulerAngles.y > 90f,
+                keys = keys
             });
         }
 
@@ -850,6 +866,7 @@ public class TigerMothPlugin : BaseUnityPlugin
                 w.Write(frames[i].animHash);
                 w.Write(frames[i].animTime);
                 w.Write((byte)(frames[i].flipX ? 1 : 0));
+                w.Write(frames[i].keys);
             }
         }
     }
@@ -868,6 +885,7 @@ public class TigerMothPlugin : BaseUnityPlugin
                 frames[i].animHash = r.ReadInt32();
                 frames[i].animTime = r.ReadSingle();
                 frames[i].flipX = r.ReadByte() != 0;
+                frames[i].keys = r.ReadByte();
             }
             return frames;
         }
@@ -908,6 +926,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             }
         }
     }
+
 
     private void SaveGhost()
     {

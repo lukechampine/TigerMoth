@@ -41,6 +41,10 @@
       <HintPath>..\To The Flame.app\Contents\Resources\Data\Managed\UnityEngine.AnimationModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="Rewired_Core">
+      <HintPath>..\To The Flame.app\Contents\Resources\Data\Managed\Rewired_Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="Assembly-CSharp">
       <HintPath>..\To The Flame.app\Contents\Resources\Data\Managed\Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
