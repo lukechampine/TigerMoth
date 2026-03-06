@@ -28,12 +28,22 @@ public class TigerMothPlugin : BaseUnityPlugin
     [HarmonyPatch(typeof(SpeedrunSplits), "NewSplit")]
     private class PatchNewSplit
     {
-        static bool Prefix(bool first)
+        static bool Prefix()
         {
-            return _instance == null || !_instance._runActive || first;
+            return _instance == null || !_instance._runActive;
         }
     }
 
+
+    // ── Harmony: skip moth update during replay ───────────
+    [HarmonyPatch(typeof(MothController), "Update")]
+    private class PatchMothUpdate
+    {
+        static bool Prefix()
+        {
+            return _instance == null || !_instance._replayActive;
+        }
+    }
 
     // ── Harmony: capture EndRun for final split ───────────
     [HarmonyPatch(typeof(SpeedrunSplits), "EndRun")]
@@ -106,6 +116,9 @@ public class TigerMothPlugin : BaseUnityPlugin
     private GhostFrame[] _ghostActivePlayback;   // current playback source
     private int _ghostPlaybackIndex;
     private bool _ghostEnabled = true;
+    private bool _replayActive;
+    private GhostFrame[] _replayFrames;
+    private int _replayIndex;
     private SavedState _savedState;
     private SavedState[] _checkpoints;
     private bool _pendingLoad;
@@ -327,6 +340,49 @@ public class TigerMothPlugin : BaseUnityPlugin
 
         ManageSplits();
 
+        // Replay mode: drive moth from recorded frames
+        if (_replayActive)
+        {
+            // Any movement input ends replay
+            var controls = InputManager.controls;
+            float h = controls != null ? controls.GetAxis("LookHorizontal") : 0f;
+            float v = controls != null ? controls.GetAxis("LookVertical") : 0f;
+            if (h != 0f || v != 0f)
+            {
+                StopReplay();
+            }
+            else if (_replayIndex < _replayFrames.Length)
+            {
+                var f = _replayFrames[_replayIndex];
+                _moth.transform.position = new Vector3(f.x, f.y, 0f);
+                _moth.transform.eulerAngles = new Vector3(0f, f.flipX ? 180f : 0f, 0f);
+                _rb.position = new Vector2(f.x, f.y);
+                _rb.velocity = Vector2.zero;
+                var animator = GetMothAnimator();
+                if (animator != null && f.animHash != 0)
+                    animator.Play(f.animHash, 0, f.animTime);
+                _replayIndex++;
+            }
+            else if (_practiceMode)
+            {
+                // Practice mode: advance to next split's gold ghost
+                _currentSplitIndex++;
+                if (_currentSplitIndex < _managedSplits.Count)
+                {
+                    var next = _managedSplits[_currentSplitIndex];
+                    _splitTimeValueField.SetValue(next, 0f);
+                    _splitTickingField.SetValue(next, true);
+                }
+                ChainReplay();
+            }
+            else
+            {
+                // Normal mode: PB exhausted, done
+                StopReplay();
+            }
+            return;
+        }
+
         // Ghost: record frame
         if (_runActive && _ghostRecording != null)
         {
@@ -409,6 +465,9 @@ public class TigerMothPlugin : BaseUnityPlugin
         }
 
 
+        if (Input.GetKeyDown(KeyCode.F))
+            StartReplay();
+
         if (Input.GetKeyDown(KeyCode.G))
         {
             _ghostEnabled = !_ghostEnabled;
@@ -435,6 +494,93 @@ public class TigerMothPlugin : BaseUnityPlugin
         if (cam == null) return;
 
         Camera.main.orthographicSize = cam.targetSize + _zoomSteps * 2f;
+    }
+
+    // ── Replay ──────────────────────────────────────────
+
+    private void StartReplay()
+    {
+        if (!_runActive || _currentSplitIndex < 0 || _currentSplitIndex >= SplitNames.Length)
+            return;
+
+        GhostFrame[] frames = null;
+
+        if (_practiceMode)
+        {
+            // Practice mode: use gold ghost for current split
+            if (_goldGhostFrames != null && _currentSplitIndex < _goldGhostFrames.Length)
+                frames = _goldGhostFrames[_currentSplitIndex];
+        }
+        else
+        {
+            // Normal mode: use full PB ghost from the start
+            frames = _ghostPlaybackFrames;
+        }
+
+        if (frames == null || frames.Length == 0)
+            return;
+
+        _replayFrames = frames;
+        _replayIndex = 0;
+        _replayActive = true;
+
+        // Zero physics; Harmony prefix skips MothController.Update during replay
+        _rb.velocity = Vector2.zero;
+        if (_ghost != null) _ghost.SetActive(false);
+
+        // Reset the current split timer to 0 and ensure it ticks during replay
+        if (_currentSplitIndex >= 0 && _currentSplitIndex < _managedSplits.Count
+            && _managedSplits[_currentSplitIndex] != null)
+        {
+            _splitTimeValueField.SetValue(_managedSplits[_currentSplitIndex], 0f);
+            _splitTickingField.SetValue(_managedSplits[_currentSplitIndex], true);
+        }
+
+        Logger.LogInfo("TigerMoth: replay started (" + frames.Length + " frames)");
+    }
+
+    private void StopReplay()
+    {
+        if (!_replayActive) return;
+        _replayActive = false;
+
+        // Sync moth state to last replay frame so controls feel correct
+        if (_replayIndex > 0 && _replayIndex <= _replayFrames.Length)
+        {
+            var f = _replayFrames[_replayIndex - 1];
+            _rb.position = new Vector2(f.x, f.y);
+            _rb.velocity = Vector2.zero;
+            int facing = f.flipX ? -1 : 1;
+            _facingDirectionField.SetValue(_moth, facing);
+            _jumpCanceledField.SetValue(_moth, false);
+            _chargingTimeField.SetValue(_moth, 0f);
+            _hitstopField.SetValue(_moth, false);
+            _queuedJumpField.SetValue(_moth, false);
+        }
+
+        _replayFrames = null;
+        Logger.LogInfo("TigerMoth: replay ended");
+    }
+
+    private void ChainReplay()
+    {
+        if (!_replayActive) return;
+
+        if (_currentSplitIndex < SplitNames.Length
+            && _goldGhostFrames != null
+            && _currentSplitIndex < _goldGhostFrames.Length
+            && _goldGhostFrames[_currentSplitIndex] != null
+            && _goldGhostFrames[_currentSplitIndex].Length > 0)
+        {
+            _replayFrames = _goldGhostFrames[_currentSplitIndex];
+            _replayIndex = 0;
+            Logger.LogInfo("TigerMoth: replay chained to split " + _currentSplitIndex
+                + " (" + _replayFrames.Length + " frames)");
+        }
+        else
+        {
+            StopReplay();
+        }
     }
 
     // ── Helpers ─────────────────────────────────────────
@@ -536,6 +682,8 @@ public class TigerMothPlugin : BaseUnityPlugin
 
     private void ReloadAndRestore()
     {
+        _replayActive = false;
+        _replayFrames = null;
         _pendingLoad = true;
         _moth = null;
         _rb = null;
@@ -563,6 +711,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         // Detect run was reset (splits destroyed externally, e.g. game restart)
         if (_runActive && (_managedSplits.Count == 0 || _managedSplits[0] == null))
         {
+            StopReplay();
             _runActive = false;
             _managedSplits.Clear();
             _currentSplitIndex = -1;
@@ -693,6 +842,9 @@ public class TigerMothPlugin : BaseUnityPlugin
                 if (_practiceMode)
                     StartGoldGhostPlayback(_currentSplitIndex);
             }
+
+            if (_replayActive && _practiceMode)
+                ChainReplay();
             return;
         }
 
@@ -715,6 +867,9 @@ public class TigerMothPlugin : BaseUnityPlugin
             if (_practiceMode)
                 StartGoldGhostPlayback(_currentSplitIndex);
         }
+
+        if (_replayActive && _practiceMode)
+            ChainReplay();
     }
 
     private void OnEndRun()
@@ -749,6 +904,9 @@ public class TigerMothPlugin : BaseUnityPlugin
         }
 
         _currentSplitIndex = SplitNames.Length;
+
+        if (_replayActive)
+            StopReplay();
     }
 
     // ── Formatting helpers ────────────────────────────────
@@ -901,6 +1059,7 @@ public class TigerMothPlugin : BaseUnityPlugin
                 _ghostPlaybackFrames = ReadGhostFrames(path);
                 Logger.LogInfo("TigerMoth: PB ghost loaded (" + _ghostPlaybackFrames.Length + " frames)");
             }
+
         }
         catch (System.Exception e)
         {
@@ -1069,6 +1228,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         new[] { "H", "Save" },
         new[] { "I", "Load" },
         new[] { "1-5", "Checkpoints" },
+        new[] { "F", "Follow ghost" },
         new[] { "G", "Ghost" },
         new[] { "[", "Zoom in" },
         new[] { "]", "Zoom out" },
