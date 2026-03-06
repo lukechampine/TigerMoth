@@ -4,40 +4,46 @@ A speedrun practice and timer mod for *To The Flame*.
 
 ## Features
 
-### Save States
+### Better Splits
 
-- **H** — Save state at current position
-- **I** — Load saved state (reloads scene and restores)
-- **1** — Reset to game start (practice first split)
-- **2–5** — Load hardcoded checkpoints (Before Church, Before Gift, Mid-Tower, Near End)
+Adds three more splits to the game, with a LiveSplit-inspired in-game timer:
 
-Captures full game state: position, velocity, jumps, facing direction, charging time, hitstop, animation, camera, spider, and ExtraJump powerup.
+![Practice Mode](practice_mode.png)
 
-### Split Timer
+Now you can track your PBs, both for full-game runs and individual splits!
 
-Automatic split timing with four segments: **Church**, **Gift**, **Tower**, **End**. Splits trigger on area entry (Church, Tower), item pickup (Gift), or run completion (End).
+### Practice Mode
 
-- Tracks **personal best** and **gold segments** (best individual split times), persisted across sessions
-- Shows **delta times** against PB (normal mode) or gold segments (practice mode)
-- **Live delta** appears when approaching PB/gold pace
-- **Best Possible Time** updates as you complete splits (actual segments + remaining golds)
-- **Practice mode** activates on any state load — skips the loaded split, shows segment-only times, and labels the BPT as "Sum of Best"
+Press `1`–`5` to load a checkpoint and enter Practice Mode. The checkpoints are
+placed just before each split (plus one at the end, for practicing that last
+jump!), and the timer starts as soon as you enter the split. In Practice Mode,
+the timer shows your best split times, as well as your sum-of-best.
+
+In addition to the hardcoded checkpoints, you can use `H` and `I` to
+quicksave, for practicing tricky sections.
 
 ### Ghost
 
-A translucent ghost moth replays your best run or gold segments for visual pacing.
+Yes! Your best runs are recorded so that you can race against them. When starting
+a new run (via New Game or `R`), you will race against your PB ghost. In Practice
+Mode, you will race against your gold split ghosts. The ghost is updated whenever
+you get a new PB or a new gold split (either in a normal run or Practice Mode).
 
-- **PB ghost** plays during normal runs
-- **Gold segment ghosts** play during practice mode (one per split)
-- **G** — Toggle ghost visibility
-- Ghost data is saved to disk alongside PB/gold times
+If the ghost is distracting, you can toggle its visibility with `G`.
 
 ### Camera Zoom
 
-- **[** — Zoom in
-- **]** — Zoom out
+- `[` — Zoom in
+- `]` — Zoom out
 
-Works reliably in all areas, including sections where the game dynamically adjusts camera zoom.
+Very helpful for seeing more of the surrounding geometry. Note that any zoom
+level other than 0 will disable the game's dynamic zoom logic (e.g. widening the
+zoom when the Spider is nearby).
+
+### Disclaimer
+
+Not exhaustively tested. Might have weird interactions with other game settings.
+If something seems clearly wrong, open an issue!
 
 ## Install (pre-built)
 
