@@ -145,7 +145,8 @@ public class TigerMothPlugin : BaseUnityPlugin
     private bool _replayActive;
     private GhostFrame[] _replayFrames;
     private int _replayIndex;
-    private SavedState _savedState;
+    private SavedState _savedState;        // H/I quicksave
+    private SavedState _pendingRestore;    // state to apply after scene reload
     private SavedState[] _checkpoints;
     private bool _pendingLoad;
 
@@ -365,7 +366,7 @@ public class TigerMothPlugin : BaseUnityPlugin
                 LeanTween.cancel(mask);
                 mask.transform.localScale = Vector3.one * 10000f;
             }
-            if (_savedState != null)
+            if (_pendingRestore != null)
                 ApplyState();
             return;
         }
@@ -375,7 +376,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         // Checkpoints (must be checked before replay block which returns early)
         if (Input.GetKeyDown(KeyCode.Alpha1))
         {
-            _savedState = null;
+            _pendingRestore = null;
             _practiceMode = true;
             _practiceSkipIndex = -1;
             ReloadAndRestore();
@@ -386,9 +387,9 @@ public class TigerMothPlugin : BaseUnityPlugin
         {
             if (Input.GetKeyDown(CpKeys[i]))
             {
-                _savedState = _checkpoints[i];
+                _pendingRestore = _checkpoints[i];
                 _practiceMode = true;
-                _practiceSkipIndex = _savedState.currentSplitIndex;
+                _practiceSkipIndex = _pendingRestore.currentSplitIndex;
                 ReloadAndRestore();
                 return;
             }
@@ -491,6 +492,7 @@ public class TigerMothPlugin : BaseUnityPlugin
                 Logger.LogWarning("TigerMoth: no saved state to load");
             else
             {
+                _pendingRestore = _savedState;
                 _practiceMode = true;
                 _practiceSkipIndex = _savedState.currentSplitIndex;
                 ReloadAndRestore();
@@ -1620,8 +1622,10 @@ public class TigerMothPlugin : BaseUnityPlugin
 
     private void ApplyState()
     {
-        if (_savedState == null || _rb == null)
+        if (_pendingRestore == null || _rb == null)
             return;
+        var _savedState = _pendingRestore;
+        _pendingRestore = null;
 
         // Physics body
         _rb.position = _savedState.rbPosition;

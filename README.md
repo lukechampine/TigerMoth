@@ -29,7 +29,8 @@ a new run (via New Game or `R`), you will race against your PB ghost. In Practic
 Mode, you will race against your gold split ghosts. The ghost is updated whenever
 you get a new PB or a new gold split (either in a normal run or Practice Mode).
 
-If the ghost is distracting, you can toggle its visibility with `G`.
+If the ghost is distracting, you can toggle its visibility with `G`. You can also
+replay the current ghost recording directly with `F`.
 
 ### Camera Zoom
 
