@@ -4,6 +4,7 @@ using System.IO;
 using System.Reflection;
 using BepInEx;
 using HarmonyLib;
+using Rewired;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
@@ -32,6 +33,8 @@ public class TigerMothPlugin : BaseUnityPlugin
         static void Prefix()
         {
             if (_instance == null) return;
+            _instance.StopTasPlayback();
+            _instance._tasMode = _instance._tasArmedAfterReset;
             _instance._replayActive = false;
             _instance._replayFrames = null;
             _instance._runActive = false;
@@ -57,7 +60,15 @@ public class TigerMothPlugin : BaseUnityPlugin
     {
         static bool Prefix()
         {
+            if (_instance != null)
+                _instance.PrepareTasFrame();
             return _instance == null || !_instance._replayActive;
+        }
+
+        static void Postfix()
+        {
+            if (_instance != null)
+                _instance.TickTasPlayback();
         }
     }
 
@@ -79,6 +90,51 @@ public class TigerMothPlugin : BaseUnityPlugin
         {
             if (_instance != null && _instance._runActive)
                 _instance.OnEndRun();
+        }
+    }
+
+    [HarmonyPatch(typeof(Player), "GetAxis", new[] { typeof(string) })]
+    private class PatchRewiredGetAxis
+    {
+        static bool Prefix(Player __instance, string actionName, ref float __result)
+        {
+            return _instance == null || !_instance.TryOverrideTasAxis(__instance, actionName, ref __result);
+        }
+    }
+
+    [HarmonyPatch(typeof(Player), "GetAxisRaw", new[] { typeof(string) })]
+    private class PatchRewiredGetAxisRaw
+    {
+        static bool Prefix(Player __instance, string actionName, ref float __result)
+        {
+            return _instance == null || !_instance.TryOverrideTasAxis(__instance, actionName, ref __result);
+        }
+    }
+
+    [HarmonyPatch(typeof(Player), "GetButton", new[] { typeof(string) })]
+    private class PatchRewiredGetButton
+    {
+        static bool Prefix(Player __instance, string actionName, ref bool __result)
+        {
+            return _instance == null || !_instance.TryOverrideTasButton(__instance, actionName, ref __result, 0);
+        }
+    }
+
+    [HarmonyPatch(typeof(Player), "GetButtonDown", new[] { typeof(string) })]
+    private class PatchRewiredGetButtonDown
+    {
+        static bool Prefix(Player __instance, string actionName, ref bool __result)
+        {
+            return _instance == null || !_instance.TryOverrideTasButton(__instance, actionName, ref __result, 1);
+        }
+    }
+
+    [HarmonyPatch(typeof(Player), "GetButtonUp", new[] { typeof(string) })]
+    private class PatchRewiredGetButtonUp
+    {
+        static bool Prefix(Player __instance, string actionName, ref bool __result)
+        {
+            return _instance == null || !_instance.TryOverrideTasButton(__instance, actionName, ref __result, 2);
         }
     }
 
@@ -123,10 +179,36 @@ public class TigerMothPlugin : BaseUnityPlugin
         public byte keys; // bitmask: 1=left, 2=right, 4=up, 8=down
     }
 
+    private enum TasCommandType
+    {
+        Wait,
+        Slide,
+        Jump,
+        ReverseJump,
+    }
+
+    private enum TasJumpStage
+    {
+        WaitingForJumps,
+        HoldingJump,
+        ReleaseFrame,
+        WaitAfterRelease,
+        ReverseFrame,
+    }
+
+    private struct TasCommand
+    {
+        public TasCommandType type;
+        public int holdFrames;
+        public int waitFrames;
+    }
+
     private const byte KeyLeft = 1;
     private const byte KeyRight = 2;
     private const byte KeyUp = 4;
     private const byte KeyDown = 8;
+    private const string TasScriptFileName = "ttf.tas";
+    private const float IdleVelocitySqrThreshold = 1e-8f;
 
     // ── Fields ────────────────────────────────────────────
     private MothController _moth;
@@ -139,12 +221,36 @@ public class TigerMothPlugin : BaseUnityPlugin
     private int[] _ghostSegmentStarts;
     private GhostFrame[] _ghostPlaybackFrames;   // PB ghost (full run)
     private GhostFrame[][] _goldGhostFrames;     // per-split gold ghosts
+    private GhostFrame[] _tasGhostPlaybackFrames; // TAS ghost (full run)
+    private GhostFrame[][] _tasSplitGhostFrames;  // TAS per-split ghosts (fallback to gold)
     private GhostFrame[] _ghostActivePlayback;   // current playback source
     private int _ghostPlaybackIndex;
     private bool _ghostEnabled = true;
     private bool _replayActive;
     private GhostFrame[] _replayFrames;
     private int _replayIndex;
+    private readonly List<TasCommand> _tasCommands = new List<TasCommand>(256);
+    private string _tasScriptPath;
+    private int _tasScriptFrameCount;
+    private bool _tasArmedAfterReset;
+    private bool _tasPlaybackActive;
+    private int _tasPlaybackFrameCount;
+    private int _tasCommandIndex;
+    private int _tasCommandFrame;
+    private int _tasIdleSectionFrames;
+    private bool _tasWasIdleLastFrame;
+    private TasJumpStage _tasJumpStage;
+    private int _tasJumpHoldFramesLeft;
+    private int _tasJumpWaitFramesLeft;
+    private bool _tasPrevJumpHeld;
+    private bool _tasCurrentJumpHeld;
+    private float _tasCurrentLookHorizontal;
+    private float _tasCurrentLookVertical;
+    private bool _tasStopAfterFrame;
+    private int _lastIdleFramesDetected;
+    private float _tasPrevTimeScale = 1f;
+    private float _tasPrevFixedDeltaTime = 1f / 50f;
+    private bool _tasRuntimeSettingsApplied;
     private SavedState _savedState;        // H/I quicksave
     private SavedState _pendingRestore;    // state to apply after scene reload
     private SavedState[] _checkpoints;
@@ -200,6 +306,7 @@ public class TigerMothPlugin : BaseUnityPlugin
     // Practice mode — entered on any load, exited on game reset (R)
     private bool _practiceMode;
     private int _practiceSkipIndex;
+    private bool _tasMode;
 
     // Camera zoom (offset applied via Harmony patch on AdvancedCamera.Update)
     private int _zoomSteps;
@@ -277,6 +384,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             {
                 _zoomSteps = 0;
                 _practiceMode = false;
+                _tasMode = false;
                 _replayActive = false;
                 _replayFrames = null;
                 _runActive = false;
@@ -373,11 +481,18 @@ public class TigerMothPlugin : BaseUnityPlugin
 
         ManageSplits();
 
+        if (Input.GetKeyDown(KeyCode.T))
+        {
+            TriggerTasResetAndPlayback();
+            return;
+        }
+
         // Checkpoints (must be checked before replay block which returns early)
         if (Input.GetKeyDown(KeyCode.Alpha1))
         {
             _pendingRestore = null;
             _practiceMode = true;
+            _tasMode = false;
             _practiceSkipIndex = -1;
             ReloadAndRestore();
             return;
@@ -389,6 +504,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             {
                 _pendingRestore = _checkpoints[i];
                 _practiceMode = true;
+                _tasMode = false;
                 _practiceSkipIndex = _pendingRestore.currentSplitIndex;
                 ReloadAndRestore();
                 return;
@@ -418,9 +534,9 @@ public class TigerMothPlugin : BaseUnityPlugin
                     animator.Play(f.animHash, 0, f.animTime);
                 _replayIndex++;
             }
-            else if (_practiceMode)
+            else if (IsSegmentMode())
             {
-                // Practice mode: advance to next split's gold ghost
+                // Practice/TAS mode: advance to next split's segment ghost
                 _currentSplitIndex++;
                 if (_currentSplitIndex < _managedSplits.Count)
                 {
@@ -494,6 +610,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             {
                 _pendingRestore = _savedState;
                 _practiceMode = true;
+                _tasMode = false;
                 _practiceSkipIndex = _savedState.currentSplitIndex;
                 ReloadAndRestore();
             }
@@ -541,11 +658,10 @@ public class TigerMothPlugin : BaseUnityPlugin
 
         GhostFrame[] frames = null;
 
-        if (_practiceMode)
+        if (IsSegmentMode())
         {
-            // Practice mode: use gold ghost for current split
-            if (_goldGhostFrames != null && _currentSplitIndex < _goldGhostFrames.Length)
-                frames = _goldGhostFrames[_currentSplitIndex];
+            // Practice/TAS mode: use per-split ghost
+            frames = GetSegmentPlaybackFrames(_currentSplitIndex);
         }
         else
         {
@@ -598,20 +714,540 @@ public class TigerMothPlugin : BaseUnityPlugin
         Logger.LogInfo("TigerMoth: replay ended");
     }
 
+    private void TriggerTasResetAndPlayback()
+    {
+        string error;
+        if (!LoadTasScript(out error))
+        {
+            _tasArmedAfterReset = false;
+            _tasMode = false;
+            StopTasPlayback();
+            Logger.LogWarning("TigerMoth: TAS script load failed: " + error);
+            return;
+        }
+
+        _tasArmedAfterReset = true;
+        _lastIdleFramesDetected = 0;
+        _tasMode = true;
+        StopTasPlayback();
+        StopReplay();
+        _pendingRestore = null;
+        _practiceMode = false;
+        _practiceSkipIndex = -1;
+        ReloadAndRestore(keepTasArmed: true);
+        Logger.LogInfo("TigerMoth: TAS reset queued (" + _tasCommands.Count
+            + " commands, " + _tasScriptFrameCount + " scripted frames)");
+    }
+
+    private void StartTasPlayback()
+    {
+        if (_tasCommands.Count == 0)
+        {
+            _tasArmedAfterReset = false;
+            Logger.LogWarning("TigerMoth: TAS playback skipped (no commands loaded)");
+            return;
+        }
+
+        _tasArmedAfterReset = false;
+        _tasPlaybackActive = true;
+        _tasPlaybackFrameCount = 0;
+        _tasIdleSectionFrames = 0;
+        _tasWasIdleLastFrame = false;
+        ResetTasCommandState();
+        ApplyTasRuntimeSettings();
+        Logger.LogInfo("TigerMoth: TAS playback started (" + _tasCommands.Count
+            + " commands, " + _tasScriptFrameCount + " scripted frames)");
+    }
+
+    private void StopTasPlayback()
+    {
+        if (!_tasPlaybackActive)
+            return;
+
+        _tasPlaybackActive = false;
+        _tasPlaybackFrameCount = 0;
+        _tasIdleSectionFrames = 0;
+        _tasWasIdleLastFrame = false;
+        ResetTasCommandState();
+        RestoreTasRuntimeSettings();
+        Logger.LogInfo("TigerMoth: TAS playback finished");
+    }
+
+    private void PrepareTasFrame()
+    {
+        if (!_tasPlaybackActive)
+            return;
+
+        _tasCurrentJumpHeld = false;
+        _tasCurrentLookHorizontal = 0f;
+        _tasCurrentLookVertical = 0f;
+
+        if (_tasCommandIndex >= _tasCommands.Count)
+        {
+            _tasStopAfterFrame = true;
+            return;
+        }
+
+        PrepareCurrentTasCommandInput();
+    }
+
+    private void TickTasPlayback()
+    {
+        if (!_tasPlaybackActive)
+            return;
+
+        bool isIdle = _rb != null && _rb.velocity.sqrMagnitude <= IdleVelocitySqrThreshold;
+        if (isIdle)
+        {
+            _tasIdleSectionFrames = _tasWasIdleLastFrame ? _tasIdleSectionFrames + 1 : 1;
+            _lastIdleFramesDetected = _tasIdleSectionFrames;
+            _tasWasIdleLastFrame = true;
+        }
+        else
+        {
+            _tasIdleSectionFrames = 0;
+            _tasWasIdleLastFrame = false;
+        }
+
+        _tasPlaybackFrameCount++;
+        _tasPrevJumpHeld = _tasCurrentJumpHeld;
+        if (_tasStopAfterFrame)
+            StopTasPlayback();
+    }
+
+    private void ApplyTasRuntimeSettings()
+    {
+        if (_tasRuntimeSettingsApplied)
+            return;
+
+        _tasPrevTimeScale = Time.timeScale;
+        _tasPrevFixedDeltaTime = Time.fixedDeltaTime;
+        Time.timeScale = 1f;
+        _tasRuntimeSettingsApplied = true;
+    }
+
+    private void RestoreTasRuntimeSettings()
+    {
+        if (!_tasRuntimeSettingsApplied)
+            return;
+
+        Time.timeScale = _tasPrevTimeScale;
+        Time.fixedDeltaTime = _tasPrevFixedDeltaTime;
+        _tasRuntimeSettingsApplied = false;
+    }
+
+    // mode: 0 = hold, 1 = down, 2 = up
+    private bool TryOverrideTasButton(Player player, string actionName, ref bool value, int mode)
+    {
+        if (!_tasPlaybackActive || !ReferenceEquals(player, InputManager.controls))
+            return false;
+
+        if (actionName == "Jump")
+        {
+            if (mode == 0)
+                value = _tasCurrentJumpHeld;
+            else if (mode == 1)
+                value = !_tasPrevJumpHeld && _tasCurrentJumpHeld;
+            else
+                value = _tasPrevJumpHeld && !_tasCurrentJumpHeld;
+            return true;
+        }
+
+        if (actionName == "CancelJump")
+        {
+            value = false;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryOverrideTasAxis(Player player, string actionName, ref float value)
+    {
+        if (!_tasPlaybackActive || !ReferenceEquals(player, InputManager.controls))
+            return false;
+
+        if (actionName == "LookVertical")
+        {
+            value = _tasCurrentLookVertical;
+            return true;
+        }
+
+        if (actionName == "LookHorizontal")
+        {
+            value = _tasCurrentLookHorizontal;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool LoadTasScript(out string error)
+    {
+        _tasCommands.Clear();
+        _tasScriptFrameCount = 0;
+        _tasScriptPath = ResolveTasScriptPath();
+
+        if (!File.Exists(_tasScriptPath))
+        {
+            error = "missing " + TasScriptFileName + " (looked in game root and config)";
+            return false;
+        }
+
+        string[] lines;
+        try
+        {
+            lines = File.ReadAllLines(_tasScriptPath);
+        }
+        catch (System.Exception e)
+        {
+            error = "failed to read '" + _tasScriptPath + "': " + e.Message;
+            return false;
+        }
+
+        for (int i = 0; i < lines.Length; i++)
+        {
+            string line = lines[i].Trim();
+            if (line.Length == 0
+                || line.StartsWith("--")
+                || line.StartsWith("//")
+                || line.StartsWith("#"))
+                continue;
+
+            string[] parts = line.Split(new[] { ' ', '\t' }, System.StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0)
+                continue;
+
+            string cmd = parts[0].ToLowerInvariant();
+            int frames;
+            if (cmd == "j" || cmd == "jump")
+            {
+                if (!TryParseTasFrames(parts, i + 1, cmd, minFrames: 1, out frames, out error))
+                    return false;
+                AppendTasJump(frames);
+                continue;
+            }
+
+            if (cmd == "rj")
+            {
+                int holdFrames;
+                int reverseDelayFrames;
+                if (!TryParseTasReverseJump(parts, i + 1, out holdFrames, out reverseDelayFrames, out error))
+                    return false;
+                AppendTasReverseJump(holdFrames, reverseDelayFrames);
+                continue;
+            }
+
+            if (cmd == "w" || cmd == "wait")
+            {
+                if (!TryParseTasFrames(parts, i + 1, cmd, minFrames: 0, out frames, out error))
+                    return false;
+                AppendTasWait(frames);
+                continue;
+            }
+
+            if (cmd == "s" || cmd == "slide")
+            {
+                if (!TryParseTasFrames(parts, i + 1, cmd, minFrames: 0, out frames, out error))
+                    return false;
+                AppendTasSlide(frames);
+                continue;
+            }
+
+            error = "line " + (i + 1) + ": unknown command '" + parts[0] + "'";
+            return false;
+        }
+
+        if (_tasCommands.Count == 0)
+        {
+            error = "no TAS commands found in '" + _tasScriptPath + "'";
+            return false;
+        }
+
+        error = null;
+        Logger.LogInfo("TigerMoth: TAS script loaded from " + _tasScriptPath);
+        return true;
+    }
+
+    private static bool TryParseTasFrames(string[] parts, int lineNumber, string command,
+        int minFrames, out int frames, out string error)
+    {
+        frames = 0;
+        if (parts.Length != 2)
+        {
+            error = "line " + lineNumber + ": expected '" + command + " <frames>'";
+            return false;
+        }
+
+        if (!int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out frames))
+        {
+            error = "line " + lineNumber + ": invalid frame count '" + parts[1] + "'";
+            return false;
+        }
+
+        if (frames < minFrames)
+        {
+            error = "line " + lineNumber + ": frame count must be >= " + minFrames;
+            return false;
+        }
+
+        error = null;
+        return true;
+    }
+
+    private static bool TryParseTasReverseJump(string[] parts, int lineNumber,
+        out int holdFrames, out int reverseDelayFrames, out string error)
+    {
+        holdFrames = 0;
+        reverseDelayFrames = 0;
+        if (parts.Length != 2 && parts.Length != 3)
+        {
+            error = "line " + lineNumber + ": expected 'rj <jumpFrames> [waitFrames]'";
+            return false;
+        }
+
+        if (!int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out holdFrames)
+            || holdFrames < 1)
+        {
+            error = "line " + lineNumber + ": jumpFrames must be >= 1";
+            return false;
+        }
+
+        if (parts.Length == 3
+            && (!int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture,
+                out reverseDelayFrames) || reverseDelayFrames < 0))
+        {
+            error = "line " + lineNumber + ": waitFrames must be >= 0";
+            return false;
+        }
+
+        error = null;
+        return true;
+    }
+
+    private void AppendTasJump(int holdFrames)
+    {
+        _tasCommands.Add(new TasCommand
+        {
+            type = TasCommandType.Jump,
+            holdFrames = holdFrames,
+            waitFrames = 0,
+        });
+        _tasScriptFrameCount += holdFrames + 1; // includes release frame
+    }
+
+    private void AppendTasReverseJump(int holdFrames, int reverseDelayFrames)
+    {
+        _tasCommands.Add(new TasCommand
+        {
+            type = TasCommandType.ReverseJump,
+            holdFrames = holdFrames,
+            waitFrames = reverseDelayFrames,
+        });
+        _tasScriptFrameCount += holdFrames + 1 + reverseDelayFrames + 1;
+    }
+
+    private void AppendTasWait(int frames)
+    {
+        _tasCommands.Add(new TasCommand
+        {
+            type = TasCommandType.Wait,
+            holdFrames = frames,
+            waitFrames = 0,
+        });
+        _tasScriptFrameCount += frames;
+    }
+
+    private void AppendTasSlide(int frames)
+    {
+        _tasCommands.Add(new TasCommand
+        {
+            type = TasCommandType.Slide,
+            holdFrames = frames,
+            waitFrames = 0,
+        });
+        _tasScriptFrameCount += frames;
+    }
+
+    private static string ResolveTasScriptPath()
+    {
+        string gameRootPath = Path.Combine(BepInEx.Paths.GameRootPath, TasScriptFileName);
+        if (File.Exists(gameRootPath))
+            return gameRootPath;
+        return Path.Combine(BepInEx.Paths.ConfigPath, TasScriptFileName);
+    }
+
+    private void ResetTasCommandState()
+    {
+        _tasCommandIndex = 0;
+        _tasCommandFrame = 0;
+        _tasJumpStage = TasJumpStage.WaitingForJumps;
+        _tasJumpHoldFramesLeft = 0;
+        _tasJumpWaitFramesLeft = 0;
+        _tasPrevJumpHeld = false;
+        _tasCurrentJumpHeld = false;
+        _tasCurrentLookHorizontal = 0f;
+        _tasCurrentLookVertical = 0f;
+        _tasStopAfterFrame = false;
+    }
+
+    private void PrepareCurrentTasCommandInput()
+    {
+        while (_tasCommandIndex < _tasCommands.Count)
+        {
+            var command = _tasCommands[_tasCommandIndex];
+
+            if (command.type == TasCommandType.Wait)
+            {
+                if (command.holdFrames <= 0)
+                {
+                    AdvanceTasCommand();
+                    continue;
+                }
+
+                _tasCommandFrame++;
+                if (_tasCommandFrame >= command.holdFrames)
+                    AdvanceTasCommand();
+                return;
+            }
+
+            if (command.type == TasCommandType.Slide)
+            {
+                if (command.holdFrames <= 0)
+                {
+                    AdvanceTasCommand();
+                    continue;
+                }
+
+                // Slide timer only starts once moth is grounded (jumps == maxJumps).
+                if (_tasCommandFrame == 0 && !IsMothGroundedForSlide())
+                    return;
+
+                _tasCommandFrame++;
+                if (_tasCommandFrame >= command.holdFrames)
+                    AdvanceTasCommand();
+                return;
+            }
+
+            if (_tasJumpStage == TasJumpStage.WaitingForJumps)
+            {
+                if (GetCurrentMothJumps() <= 0)
+                    return;
+
+                _tasJumpStage = TasJumpStage.HoldingJump;
+                _tasJumpHoldFramesLeft = command.holdFrames;
+                _tasJumpWaitFramesLeft = command.waitFrames;
+            }
+
+            if (_tasJumpStage == TasJumpStage.HoldingJump)
+            {
+                _tasCurrentJumpHeld = true;
+                _tasCurrentLookVertical = 1f;
+                _tasJumpHoldFramesLeft--;
+                if (_tasJumpHoldFramesLeft <= 0)
+                    _tasJumpStage = TasJumpStage.ReleaseFrame;
+                return;
+            }
+
+            if (_tasJumpStage == TasJumpStage.ReleaseFrame)
+            {
+                if (command.type == TasCommandType.ReverseJump)
+                {
+                    _tasJumpStage = _tasJumpWaitFramesLeft > 0
+                        ? TasJumpStage.WaitAfterRelease
+                        : TasJumpStage.ReverseFrame;
+                }
+                else
+                {
+                    AdvanceTasCommand();
+                }
+                return;
+            }
+
+            if (_tasJumpStage == TasJumpStage.WaitAfterRelease)
+            {
+                _tasJumpWaitFramesLeft--;
+                if (_tasJumpWaitFramesLeft <= 0)
+                    _tasJumpStage = TasJumpStage.ReverseFrame;
+                return;
+            }
+
+            if (_tasJumpStage == TasJumpStage.ReverseFrame)
+            {
+                _tasCurrentLookHorizontal = GetReverseInputDirection();
+                AdvanceTasCommand();
+                return;
+            }
+        }
+
+        _tasStopAfterFrame = true;
+    }
+
+    private void AdvanceTasCommand()
+    {
+        _tasCommandIndex++;
+        _tasCommandFrame = 0;
+        _tasJumpStage = TasJumpStage.WaitingForJumps;
+        _tasJumpHoldFramesLeft = 0;
+        _tasJumpWaitFramesLeft = 0;
+        if (_tasCommandIndex >= _tasCommands.Count)
+            _tasStopAfterFrame = true;
+    }
+
+    private int GetCurrentMothJumps()
+    {
+        if (_moth == null || _jumpsField == null)
+            return 0;
+
+        object value = _jumpsField.GetValue(_moth);
+        if (value is int)
+            return (int)value;
+        return 0;
+    }
+
+    private bool IsMothGroundedForSlide()
+    {
+        if (_moth == null || _jumpsField == null || _maxJumpsField == null)
+            return false;
+
+        object jumpsValue = _jumpsField.GetValue(_moth);
+        object maxJumpsValue = _maxJumpsField.GetValue(_moth);
+        if (!(jumpsValue is int) || !(maxJumpsValue is int))
+            return false;
+
+        return (int)jumpsValue == (int)maxJumpsValue;
+    }
+
+    private float GetReverseInputDirection()
+    {
+        int facing = 1;
+        if (_moth != null && _facingDirectionField != null)
+        {
+            object value = _facingDirectionField.GetValue(_moth);
+            if (value is int)
+                facing = (int)value;
+        }
+        return facing < 0 ? 1f : -1f;
+    }
+
     private void ChainReplay()
     {
         if (!_replayActive) return;
 
-        if (_currentSplitIndex < SplitNames.Length
-            && _goldGhostFrames != null
-            && _currentSplitIndex < _goldGhostFrames.Length
-            && _goldGhostFrames[_currentSplitIndex] != null
-            && _goldGhostFrames[_currentSplitIndex].Length > 0)
+        if (_currentSplitIndex < SplitNames.Length && IsSegmentMode())
         {
-            _replayFrames = _goldGhostFrames[_currentSplitIndex];
-            _replayIndex = 0;
-            Logger.LogInfo("TigerMoth: replay chained to split " + _currentSplitIndex
-                + " (" + _replayFrames.Length + " frames)");
+            var frames = GetSegmentPlaybackFrames(_currentSplitIndex);
+            if (frames != null && frames.Length > 0)
+            {
+                _replayFrames = frames;
+                _replayIndex = 0;
+                Logger.LogInfo("TigerMoth: replay chained to split " + _currentSplitIndex
+                    + " (" + _replayFrames.Length + " frames)");
+            }
+            else
+            {
+                StopReplay();
+            }
         }
         else
         {
@@ -626,9 +1262,14 @@ public class TigerMothPlugin : BaseUnityPlugin
         return (Animator)_animatorField.GetValue(_moth);
     }
 
+    private bool IsSegmentMode()
+    {
+        return _practiceMode || _tasMode;
+    }
+
     private float ComputeSegment(int idx, float totalTime)
     {
-        if (_practiceMode)
+        if (IsSegmentMode())
             return totalTime;
         return idx == 0 ? totalTime : totalTime - _runTotals[idx - 1];
     }
@@ -657,7 +1298,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             _bestPossibleTime = 0f;
             for (int i = 0; i < SplitNames.Length; i++)
             {
-                if (!_practiceMode && _splitLocked != null && i < _splitLocked.Length && _splitLocked[i])
+                if (!IsSegmentMode() && _splitLocked != null && i < _splitLocked.Length && _splitLocked[i])
                     _bestPossibleTime += _displaySegTimes[i];
                 else
                     _bestPossibleTime += _bestSegmentsSnapshot[i];
@@ -671,13 +1312,36 @@ public class TigerMothPlugin : BaseUnityPlugin
             _ghostSegmentStarts[_currentSplitIndex] = _ghostRecording != null ? _ghostRecording.Count : 0;
     }
 
-    private void StartGoldGhostPlayback(int splitIndex)
+    private GhostFrame[] GetSegmentPlaybackFrames(int splitIndex)
     {
+        if (_tasMode)
+        {
+            if (_tasSplitGhostFrames != null
+                && splitIndex >= 0
+                && splitIndex < _tasSplitGhostFrames.Length
+                && _tasSplitGhostFrames[splitIndex] != null)
+            {
+                return _tasSplitGhostFrames[splitIndex];
+            }
+        }
+
         if (_goldGhostFrames != null
+            && splitIndex >= 0
             && splitIndex < _goldGhostFrames.Length
             && _goldGhostFrames[splitIndex] != null)
         {
-            _ghostActivePlayback = _goldGhostFrames[splitIndex];
+            return _goldGhostFrames[splitIndex];
+        }
+
+        return null;
+    }
+
+    private void StartSegmentGhostPlayback(int splitIndex)
+    {
+        var frames = GetSegmentPlaybackFrames(splitIndex);
+        if (frames != null)
+        {
+            _ghostActivePlayback = frames;
             _ghostPlaybackIndex = 0;
             if (_ghost != null && _ghostEnabled) _ghost.SetActive(true);
         }
@@ -688,18 +1352,27 @@ public class TigerMothPlugin : BaseUnityPlugin
         float segmentTime = ComputeSegment(idx, totalTime);
         _runTotals[idx] = totalTime;
 
-        bool isGold = UpdateBestSegment(idx, segmentTime);
+        bool isGold = _tasMode ? false : UpdateBestSegment(idx, segmentTime);
 
         _displaySegTimes[idx] = segmentTime;
         _displayTotalTimes[idx] = totalTime;
         _splitLocked[idx] = true;
         _splitIsGold[idx] = isGold;
 
-        // Save gold ghost segment
-        if (isGold && _ghostRecording != null && _ghostSegmentStarts != null)
-            SaveGoldSegment(idx, _ghostSegmentStarts[idx], _ghostRecording.Count);
+        if (_tasMode)
+        {
+            if (_ghostRecording != null && _ghostSegmentStarts != null)
+                SaveTasSegment(idx, _ghostSegmentStarts[idx], _ghostRecording.Count);
+        }
+        else
+        {
+            // Save gold ghost segment
+            if (isGold && _ghostRecording != null && _ghostSegmentStarts != null)
+                SaveGoldSegment(idx, _ghostSegmentStarts[idx], _ghostRecording.Count);
+        }
 
-        SavePB();
+        if (!_tasMode)
+            SavePB();
         UpdateCachedGolds();
 
         Logger.LogInfo(string.Format("TigerMoth: split '{0}' seg={1} total={2}",
@@ -716,10 +1389,16 @@ public class TigerMothPlugin : BaseUnityPlugin
 
     // ── Load state via scene reload ───────────────────────
 
-    private void ReloadAndRestore()
+    private void ReloadAndRestore(bool keepTasArmed = false)
     {
         _replayActive = false;
         _replayFrames = null;
+        StopTasPlayback();
+        if (!keepTasArmed)
+        {
+            _tasArmedAfterReset = false;
+            _tasMode = false;
+        }
         _pendingLoad = true;
         _moth = null;
         _rb = null;
@@ -748,7 +1427,9 @@ public class TigerMothPlugin : BaseUnityPlugin
         if (_runActive && (_managedSplits.Count == 0 || _managedSplits[0] == null))
         {
             StopReplay();
+            StopTasPlayback();
             _runActive = false;
+            _tasMode = false;
             _managedSplits.Clear();
             _currentSplitIndex = -1;
             _ghostRecording = null;
@@ -824,13 +1505,15 @@ public class TigerMothPlugin : BaseUnityPlugin
         _ghostSegmentStarts = new int[SplitNames.Length];
         _ghostPlaybackIndex = 0;
 
-        if (_practiceMode)
+        if (IsSegmentMode())
         {
-            // Practice: start gold ghost for first active split
+            // Practice/TAS: start per-split ghost
             _ghostActivePlayback = null;
             if (_ghost != null) _ghost.SetActive(false);
-            int firstSplit = _practiceSkipIndex < 0 ? 0 : _practiceSkipIndex + 1;
-            StartGoldGhostPlayback(firstSplit);
+            int firstSplit = _practiceMode
+                ? (_practiceSkipIndex < 0 ? 0 : _practiceSkipIndex + 1)
+                : 0;
+            StartSegmentGhostPlayback(firstSplit);
         }
         else
         {
@@ -838,6 +1521,9 @@ public class TigerMothPlugin : BaseUnityPlugin
             _ghostActivePlayback = _ghostPlaybackFrames;
             if (_ghost != null) _ghost.SetActive(_ghostEnabled && _ghostPlaybackFrames != null);
         }
+
+        if (_tasArmedAfterReset)
+            StartTasPlayback();
 
         Logger.LogInfo("TigerMoth: managed run started (" + SplitNames.Length + " splits)");
     }
@@ -875,11 +1561,11 @@ public class TigerMothPlugin : BaseUnityPlugin
                 _splitTimeValueField.SetValue(next, 0f);
                 _splitTickingField.SetValue(next, true);
 
-                if (_practiceMode)
-                    StartGoldGhostPlayback(_currentSplitIndex);
+                if (IsSegmentMode())
+                    StartSegmentGhostPlayback(_currentSplitIndex);
             }
 
-            if (_replayActive && _practiceMode)
+            if (_replayActive && IsSegmentMode())
                 ChainReplay();
             return;
         }
@@ -894,17 +1580,17 @@ public class TigerMothPlugin : BaseUnityPlugin
         if (_currentSplitIndex < _managedSplits.Count)
         {
             var next = _managedSplits[_currentSplitIndex];
-            if (_practiceMode)
+            if (IsSegmentMode())
                 _splitTimeValueField.SetValue(next, 0f);
             else
                 _splitTimeValueField.SetValue(next, totalTime);
             _splitTickingField.SetValue(next, true);
 
-            if (_practiceMode)
-                StartGoldGhostPlayback(_currentSplitIndex);
+            if (IsSegmentMode())
+                StartSegmentGhostPlayback(_currentSplitIndex);
         }
 
-        if (_replayActive && _practiceMode)
+        if (_replayActive && IsSegmentMode())
             ChainReplay();
     }
 
@@ -928,7 +1614,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         RecordSplitCompletion(lastIdx, totalTime);
 
         // Check for PB only in normal mode (practice runs skip splits)
-        if (!_practiceMode)
+        if (!IsSegmentMode())
         {
             if (System.Array.TrueForAll(_runTotals, t => t > 0)
                 && (_pbTotalTimes == null || totalTime < _pbTotalTimes[lastIdx]))
@@ -938,11 +1624,16 @@ public class TigerMothPlugin : BaseUnityPlugin
                 Logger.LogInfo("TigerMoth: New PB! " + FormatTime(totalTime));
             }
         }
+        else if (_tasMode)
+        {
+            SaveTasGhost();
+        }
 
         _currentSplitIndex = SplitNames.Length;
 
         if (_replayActive)
             StopReplay();
+        StopTasPlayback();
     }
 
     // ── Formatting helpers ────────────────────────────────
@@ -1047,6 +1738,16 @@ public class TigerMothPlugin : BaseUnityPlugin
         return Path.Combine(BepInEx.Paths.ConfigPath, "TigerMoth_ghost_" + splitIndex + ".bin");
     }
 
+    private static string TasGhostPath()
+    {
+        return Path.Combine(BepInEx.Paths.ConfigPath, "TigerMoth_tas.bin");
+    }
+
+    private static string TasSplitGhostPath(int splitIndex)
+    {
+        return Path.Combine(BepInEx.Paths.ConfigPath, "TigerMoth_tas_" + splitIndex + ".bin");
+    }
+
     private static void WriteGhostFrames(string path, GhostFrame[] frames)
     {
         using (var fs = File.Create(path))
@@ -1103,7 +1804,27 @@ public class TigerMothPlugin : BaseUnityPlugin
             _ghostPlaybackFrames = null;
         }
 
+        try
+        {
+            string path = TasGhostPath();
+            if (File.Exists(path))
+            {
+                _tasGhostPlaybackFrames = ReadGhostFrames(path);
+                Logger.LogInfo("TigerMoth: TAS ghost loaded (" + _tasGhostPlaybackFrames.Length + " frames)");
+            }
+            else
+            {
+                _tasGhostPlaybackFrames = null;
+            }
+        }
+        catch (System.Exception e)
+        {
+            Logger.LogError("TigerMoth: failed to load TAS ghost: " + e.Message);
+            _tasGhostPlaybackFrames = null;
+        }
+
         _goldGhostFrames = new GhostFrame[SplitNames.Length][];
+        _tasSplitGhostFrames = new GhostFrame[SplitNames.Length][];
         for (int i = 0; i < SplitNames.Length; i++)
         {
             try
@@ -1118,6 +1839,25 @@ public class TigerMothPlugin : BaseUnityPlugin
             catch (System.Exception e)
             {
                 Logger.LogError("TigerMoth: failed to load gold ghost " + i + ": " + e.Message);
+            }
+
+            try
+            {
+                string tasPath = TasSplitGhostPath(i);
+                if (File.Exists(tasPath))
+                {
+                    _tasSplitGhostFrames[i] = ReadGhostFrames(tasPath);
+                    Logger.LogInfo("TigerMoth: TAS split ghost " + i + " loaded (" + _tasSplitGhostFrames[i].Length + " frames)");
+                }
+                else
+                {
+                    _tasSplitGhostFrames[i] = null;
+                }
+            }
+            catch (System.Exception e)
+            {
+                Logger.LogError("TigerMoth: failed to load TAS split ghost " + i + ": " + e.Message);
+                _tasSplitGhostFrames[i] = null;
             }
         }
     }
@@ -1156,6 +1896,44 @@ public class TigerMothPlugin : BaseUnityPlugin
         catch (System.Exception e)
         {
             Logger.LogError("TigerMoth: failed to save gold ghost " + splitIndex + ": " + e.Message);
+        }
+    }
+
+    private void SaveTasGhost()
+    {
+        if (_ghostRecording == null || _ghostRecording.Count == 0)
+            return;
+        try
+        {
+            var frames = _ghostRecording.ToArray();
+            WriteGhostFrames(TasGhostPath(), frames);
+            _tasGhostPlaybackFrames = frames;
+            Logger.LogInfo("TigerMoth: TAS ghost saved (" + frames.Length + " frames)");
+        }
+        catch (System.Exception e)
+        {
+            Logger.LogError("TigerMoth: failed to save TAS ghost: " + e.Message);
+        }
+    }
+
+    private void SaveTasSegment(int splitIndex, int startFrame, int endFrame)
+    {
+        if (_ghostRecording == null || startFrame >= endFrame)
+            return;
+        try
+        {
+            int count = endFrame - startFrame;
+            var frames = new GhostFrame[count];
+            _ghostRecording.CopyTo(startFrame, frames, 0, count);
+            WriteGhostFrames(TasSplitGhostPath(splitIndex), frames);
+            if (_tasSplitGhostFrames == null || _tasSplitGhostFrames.Length != SplitNames.Length)
+                _tasSplitGhostFrames = new GhostFrame[SplitNames.Length][];
+            _tasSplitGhostFrames[splitIndex] = frames;
+            Logger.LogInfo("TigerMoth: TAS split ghost " + splitIndex + " saved (" + count + " frames)");
+        }
+        catch (System.Exception e)
+        {
+            Logger.LogError("TigerMoth: failed to save TAS split ghost " + splitIndex + ": " + e.Message);
         }
     }
 
@@ -1264,6 +2042,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         new[] { "H", "Save" },
         new[] { "I", "Load" },
         new[] { "1-5", "Checkpoints" },
+        new[] { "T", "Run ttf.tas" },
         new[] { "F", "Follow ghost" },
         new[] { "G", "Ghost" },
         new[] { "[", "Zoom in" },
@@ -1345,8 +2124,10 @@ public class TigerMothPlugin : BaseUnityPlugin
         const float actionW = 200f;
         const float padR = 16f;
         const float tableW = keycapW + gap + actionW + padR;
+        bool showIdleCount = _lastIdleFramesDetected > 0;
 
-        float tableH = rowH + OverlayBindings.Length * rowH + rowH; // header + rows + info
+        float tableH = rowH + OverlayBindings.Length * rowH + rowH
+            + (showIdleCount ? rowH : 0f); // header + rows + info
 
         float tableX = 10f;
         float tableY = 10f;
@@ -1375,6 +2156,12 @@ public class TigerMothPlugin : BaseUnityPlugin
         // Info line
         string zoomStr = _zoomSteps == 0 ? "0" : (_zoomSteps > 0 ? "+" + _zoomSteps : _zoomSteps.ToString());
         GUI.Label(new Rect(cx, cy, tableW, rowH), "Zoom: " + zoomStr, _infoStyle);
+        if (showIdleCount)
+        {
+            cy += rowH;
+            GUI.Label(new Rect(cx, cy, tableW, rowH),
+                "Idle: " + _lastIdleFramesDetected + "f", _infoStyle);
+        }
     }
 
     private static readonly Color ColorAhead = new Color(0.27f, 1f, 0.27f);
@@ -1393,13 +2180,14 @@ public class TigerMothPlugin : BaseUnityPlugin
         const float timerH = 60f;
         const float timerGap = 8f;
         const float pad = 6f;
+        bool segmentMode = IsSegmentMode();
 
-        float deltaW = _practiceMode ? deltaWPractice : deltaWNormal;
-        float tableW = _practiceMode
+        float deltaW = segmentMode ? deltaWPractice : deltaWNormal;
+        float tableW = segmentMode
             ? nameW + deltaW + segW
             : nameW + deltaW + segW + totalW;
         const float infoH = 36f;
-        float headerH = _practiceMode ? rowH : 0f;
+        float headerH = segmentMode ? rowH : 0f;
         float tableH = headerH + SplitNames.Length * rowH + timerGap + timerH
             + (_hasGolds ? infoH : 0f);
 
@@ -1413,10 +2201,10 @@ public class TigerMothPlugin : BaseUnityPlugin
         float cx = tableX + pad;
         float cy = tableY + pad;
 
-        // Practice mode header
-        if (_practiceMode)
+        // Practice/TAS mode header
+        if (segmentMode)
         {
-            GUI.Label(new Rect(cx, cy, tableW, rowH), "Practice Mode", _headerStyle);
+            GUI.Label(new Rect(cx, cy, tableW, rowH), _tasMode ? "Tas Mode" : "Practice Mode", _headerStyle);
             cy += rowH;
         }
 
@@ -1454,7 +2242,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             else if (locked)
             {
                 // Completed split — show actual delta + times
-                if (_practiceMode)
+                if (segmentMode)
                 {
                     if (hasGold)
                         DrawDelta(colX, rowY, deltaW, rowH,
@@ -1487,7 +2275,7 @@ public class TigerMothPlugin : BaseUnityPlugin
                 float liveTime = isActive
                     ? (float)_splitTimeValueField.GetValue(_managedSplits[i]) : 0f;
 
-                if (_practiceMode)
+                if (segmentMode)
                 {
                     float goldSeg = hasGold ? _bestSegmentsSnapshot[i] : 0f;
                     if (isActive && hasGold && liveTime >= goldSeg - LiveDeltaLeadTime)
@@ -1537,7 +2325,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         else if (_currentSplitIndex >= SplitNames.Length && _displayTotalTimes != null)
         {
             // Run finished — show final time
-            float finalTime = _practiceMode
+            float finalTime = segmentMode
                 ? _displaySegTimes[SplitNames.Length - 1]
                 : _displayTotalTimes[SplitNames.Length - 1];
             GUI.Label(new Rect(cx, timerY, tableW, timerH),
@@ -1548,7 +2336,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         if (_hasGolds)
         {
             float bptY = timerY + timerH;
-            string bptLabel = _practiceMode ? "Sum of Best" : "Best Possible Time";
+            string bptLabel = segmentMode ? "Sum of Best" : "Best Possible Time";
             GUI.Label(new Rect(cx, bptY, tableW, infoH), bptLabel, _splitNameStyle);
             GUI.Label(new Rect(cx, bptY, tableW, infoH), FormatTime(_bestPossibleTime), _splitTimeStyle);
         }
@@ -1671,7 +2459,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             float timeValue = (_savedState.splitTimeValues != null && i < _savedState.splitTimeValues.Length)
                 ? _savedState.splitTimeValues[i]
                 : 0f;
-            bool ticking = (i == _savedState.currentSplitIndex) && !_practiceMode;
+            bool ticking = (i == _savedState.currentSplitIndex) && !IsSegmentMode();
 
             var newSplit = Object.Instantiate(splitPrefab, splitsInstance.transform).GetComponent<Split>();
             splitsList.Add(newSplit);
@@ -1682,7 +2470,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             _splitTickingField.SetValue(newSplit, ticking);
             HideSplitVisuals(newSplit);
 
-            if (i < _savedState.currentSplitIndex && !_practiceMode)
+            if (i < _savedState.currentSplitIndex && !IsSegmentMode())
             {
                 newSplit.Lock();
                 _splitTimeValueField.SetValue(newSplit, timeValue);
