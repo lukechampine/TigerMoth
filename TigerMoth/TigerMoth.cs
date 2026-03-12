@@ -209,6 +209,9 @@ public class TigerMothPlugin : BaseUnityPlugin
     private const byte KeyDown = 8;
     private const string TasScriptFileName = "ttf.tas";
     private const float IdleVelocitySqrThreshold = 1e-8f;
+    private const int TasTargetFps = 60;
+    private const int TasStartupPreRollFrames = 0;
+    private const float FpsSampleInterval = 0.25f;
 
     // ── Fields ────────────────────────────────────────────
     private MothController _moth;
@@ -248,9 +251,16 @@ public class TigerMothPlugin : BaseUnityPlugin
     private float _tasCurrentLookVertical;
     private bool _tasStopAfterFrame;
     private int _lastIdleFramesDetected;
+    private float _fpsSampleStartRealtime;
+    private int _fpsSampleFrames;
+    private float _measuredFps;
     private float _tasPrevTimeScale = 1f;
     private float _tasPrevFixedDeltaTime = 1f / 50f;
+    private int _tasPrevTargetFrameRate = -1;
+    private int _tasPrevVSyncCount;
+    private int _tasPrevCaptureFrameRate;
     private bool _tasRuntimeSettingsApplied;
+    private int _tasStartupPreRollRemaining;
     private SavedState _savedState;        // H/I quicksave
     private SavedState _pendingRestore;    // state to apply after scene reload
     private SavedState[] _checkpoints;
@@ -314,6 +324,7 @@ public class TigerMothPlugin : BaseUnityPlugin
     // Personal best / gold tracking
     private float[] _pbTotalTimes;
     private float[] _bestSegments;
+    private float[] _tasBestSegments;
     private float[] _bestSegmentsSnapshot; // frozen at run start for display deltas
     private float[] _pbSnapshot;           // frozen at run start for display deltas
     private float[] _runTotals;
@@ -357,6 +368,8 @@ public class TigerMothPlugin : BaseUnityPlugin
 
     void Update()
     {
+        TickMeasuredFps();
+
         if (_moth == null)
         {
             var moth = FindObjectOfType<MothController>();
@@ -640,6 +653,26 @@ public class TigerMothPlugin : BaseUnityPlugin
             _zoomSteps++;
     }
 
+    private void TickMeasuredFps()
+    {
+        float now = Time.realtimeSinceStartup;
+        if (_fpsSampleStartRealtime <= 0f)
+        {
+            _fpsSampleStartRealtime = now;
+            _fpsSampleFrames = 1;
+            return;
+        }
+
+        _fpsSampleFrames++;
+        float elapsed = now - _fpsSampleStartRealtime;
+        if (elapsed < FpsSampleInterval)
+            return;
+
+        _measuredFps = _fpsSampleFrames / elapsed;
+        _fpsSampleStartRealtime = now;
+        _fpsSampleFrames = 0;
+    }
+
     void LateUpdate()
     {
         if (_zoomSteps == 0 || Camera.main == null) return;
@@ -753,10 +786,12 @@ public class TigerMothPlugin : BaseUnityPlugin
         _tasPlaybackFrameCount = 0;
         _tasIdleSectionFrames = 0;
         _tasWasIdleLastFrame = false;
+        _tasStartupPreRollRemaining = TasStartupPreRollFrames;
         ResetTasCommandState();
         ApplyTasRuntimeSettings();
         Logger.LogInfo("TigerMoth: TAS playback started (" + _tasCommands.Count
-            + " commands, " + _tasScriptFrameCount + " scripted frames)");
+            + " commands, " + _tasScriptFrameCount + " scripted frames, "
+            + "fps=" + TasTargetFps + ", preroll=" + TasStartupPreRollFrames + ")");
     }
 
     private void StopTasPlayback()
@@ -768,6 +803,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         _tasPlaybackFrameCount = 0;
         _tasIdleSectionFrames = 0;
         _tasWasIdleLastFrame = false;
+        _tasStartupPreRollRemaining = 0;
         ResetTasCommandState();
         RestoreTasRuntimeSettings();
         Logger.LogInfo("TigerMoth: TAS playback finished");
@@ -781,6 +817,12 @@ public class TigerMothPlugin : BaseUnityPlugin
         _tasCurrentJumpHeld = false;
         _tasCurrentLookHorizontal = 0f;
         _tasCurrentLookVertical = 0f;
+
+        if (_tasStartupPreRollRemaining > 0)
+        {
+            _tasStartupPreRollRemaining--;
+            return;
+        }
 
         if (_tasCommandIndex >= _tasCommands.Count)
         {
@@ -822,7 +864,14 @@ public class TigerMothPlugin : BaseUnityPlugin
 
         _tasPrevTimeScale = Time.timeScale;
         _tasPrevFixedDeltaTime = Time.fixedDeltaTime;
+        _tasPrevTargetFrameRate = Application.targetFrameRate;
+        _tasPrevVSyncCount = QualitySettings.vSyncCount;
+        _tasPrevCaptureFrameRate = Time.captureFramerate;
         Time.timeScale = 1f;
+        Time.fixedDeltaTime = 1f / TasTargetFps;
+        QualitySettings.vSyncCount = 0;
+        Application.targetFrameRate = TasTargetFps;
+        Time.captureFramerate = TasTargetFps;
         _tasRuntimeSettingsApplied = true;
     }
 
@@ -833,6 +882,9 @@ public class TigerMothPlugin : BaseUnityPlugin
 
         Time.timeScale = _tasPrevTimeScale;
         Time.fixedDeltaTime = _tasPrevFixedDeltaTime;
+        Application.targetFrameRate = _tasPrevTargetFrameRate;
+        QualitySettings.vSyncCount = _tasPrevVSyncCount;
+        Time.captureFramerate = _tasPrevCaptureFrameRate;
         _tasRuntimeSettingsApplied = false;
     }
 
@@ -1281,8 +1333,9 @@ public class TigerMothPlugin : BaseUnityPlugin
         _displayTotalTimes = new float[SplitNames.Length];
         _splitLocked = new bool[SplitNames.Length];
         _splitIsGold = new bool[SplitNames.Length];
-        _bestSegmentsSnapshot = _bestSegments != null
-            ? (float[])_bestSegments.Clone() : null;
+        float[] activeBestSegments = _tasMode ? _tasBestSegments : _bestSegments;
+        _bestSegmentsSnapshot = activeBestSegments != null
+            ? (float[])activeBestSegments.Clone() : null;
         _pbSnapshot = _pbTotalTimes != null
             ? (float[])_pbTotalTimes.Clone() : null;
         UpdateCachedGolds();
@@ -1352,7 +1405,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         float segmentTime = ComputeSegment(idx, totalTime);
         _runTotals[idx] = totalTime;
 
-        bool isGold = _tasMode ? false : UpdateBestSegment(idx, segmentTime);
+        bool isGold = UpdateBestSegment(idx, segmentTime, _tasMode);
 
         _displaySegTimes[idx] = segmentTime;
         _displayTotalTimes[idx] = totalTime;
@@ -1371,7 +1424,7 @@ public class TigerMothPlugin : BaseUnityPlugin
                 SaveGoldSegment(idx, _ghostSegmentStarts[idx], _ghostRecording.Count);
         }
 
-        if (!_tasMode)
+        if (!_tasMode || isGold)
             SavePB();
         UpdateCachedGolds();
 
@@ -1645,18 +1698,28 @@ public class TigerMothPlugin : BaseUnityPlugin
 
     // ── PB persistence ────────────────────────────────────
 
-    private bool UpdateBestSegment(int idx, float segmentTime)
+    private bool UpdateBestSegment(int idx, float segmentTime, bool tasMode)
     {
-        if (_bestSegments == null)
-            _bestSegments = new float[SplitNames.Length];
-        if (idx >= _bestSegments.Length)
+        float[] segments = tasMode ? _tasBestSegments : _bestSegments;
+        if (segments == null || segments.Length != SplitNames.Length)
+            segments = new float[SplitNames.Length];
+        if (idx >= segments.Length)
             return false;
 
-        if (_bestSegments[idx] <= 0 || segmentTime < _bestSegments[idx])
+        if (segments[idx] <= 0 || segmentTime < segments[idx])
         {
-            _bestSegments[idx] = segmentTime;
+            segments[idx] = segmentTime;
+            if (tasMode)
+                _tasBestSegments = segments;
+            else
+                _bestSegments = segments;
             return true;
         }
+
+        if (tasMode)
+            _tasBestSegments = segments;
+        else
+            _bestSegments = segments;
         return false;
     }
 
@@ -1674,6 +1737,8 @@ public class TigerMothPlugin : BaseUnityPlugin
                     _pbTotalTimes = ParseFloats(line.Substring(3));
                 else if (line.StartsWith("gold:"))
                     _bestSegments = ParseFloats(line.Substring(5));
+                else if (line.StartsWith("tas:"))
+                    _tasBestSegments = ParseFloats(line.Substring(4));
             }
             if (_pbTotalTimes != null)
                 Logger.LogInfo("TigerMoth: PB loaded — " + FormatTime(_pbTotalTimes[_pbTotalTimes.Length - 1]));
@@ -1682,6 +1747,12 @@ public class TigerMothPlugin : BaseUnityPlugin
                 float sum = 0;
                 for (int i = 0; i < _bestSegments.Length; i++) sum += _bestSegments[i];
                 Logger.LogInfo("TigerMoth: Sum of best segments — " + FormatTime(sum));
+            }
+            if (_tasBestSegments != null)
+            {
+                float tasSum = 0;
+                for (int i = 0; i < _tasBestSegments.Length; i++) tasSum += _tasBestSegments[i];
+                Logger.LogInfo("TigerMoth: TAS sum of best segments — " + FormatTime(tasSum));
             }
         }
         catch (System.Exception e)
@@ -1700,6 +1771,8 @@ public class TigerMothPlugin : BaseUnityPlugin
                 lines.Add("pb:" + JoinFloats(_pbTotalTimes));
             if (_bestSegments != null)
                 lines.Add("gold:" + JoinFloats(_bestSegments));
+            if (_tasBestSegments != null)
+                lines.Add("tas:" + JoinFloats(_tasBestSegments));
             if (lines.Count > 0)
                 File.WriteAllLines(path, lines.ToArray());
         }
@@ -2155,7 +2228,10 @@ public class TigerMothPlugin : BaseUnityPlugin
 
         // Info line
         string zoomStr = _zoomSteps == 0 ? "0" : (_zoomSteps > 0 ? "+" + _zoomSteps : _zoomSteps.ToString());
-        GUI.Label(new Rect(cx, cy, tableW, rowH), "Zoom: " + zoomStr, _infoStyle);
+        string fpsStr = _measuredFps > 0f
+            ? _measuredFps.ToString("F1", CultureInfo.InvariantCulture)
+            : "--";
+        GUI.Label(new Rect(cx, cy, tableW, rowH), "Zoom: " + zoomStr + "    FPS: " + fpsStr, _infoStyle);
         if (showIdleCount)
         {
             cy += rowH;
@@ -2479,8 +2555,9 @@ public class TigerMothPlugin : BaseUnityPlugin
                 _displaySegTimes[i] = seg;
                 _displayTotalTimes[i] = timeValue;
                 _splitLocked[i] = true;
-                _splitIsGold[i] = _bestSegments != null && i < _bestSegments.Length
-                    && _bestSegments[i] > 0 && seg <= _bestSegments[i];
+                float[] activeBestSegments = _tasMode ? _tasBestSegments : _bestSegments;
+                _splitIsGold[i] = activeBestSegments != null && i < activeBestSegments.Length
+                    && activeBestSegments[i] > 0 && seg <= activeBestSegments[i];
             }
         }
 

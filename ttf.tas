@@ -1,0 +1,36 @@
+-- Spore Pits
+j 37
+rj 28
+rj 40
+j 40
+rj 30 20
+rj 6 10
+rj 30
+slide 5
+j 39
+j 24
+j 20
+rj 30
+slide 1
+rj 1
+rj 35
+slide 7
+j 40
+j 27
+j 21
+j 16
+j 24
+j 26
+rj 11 20
+j 37
+
+-- Ruined Church
+rj 40
+rj 2
+j 42
+rj 41 10
+j 39
+rj 42
+rj 34
+j 1
+rj 41
