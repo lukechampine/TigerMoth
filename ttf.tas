@@ -1,4 +1,4 @@
--- Spore Pits
+-- Church
 j 37
 rj 28
 rj 40
@@ -22,9 +22,9 @@ j 16
 j 24
 j 26
 rj 11 20
-j 37
 
--- Ruined Church
+-- Gift
+j 37
 rj 40
 rj 2
 j 42
@@ -33,4 +33,133 @@ j 39
 rj 42
 rj 34
 j 1
-rj 41
+j 38
+rj 7
+
+-- Tower
+j 5
+slide 1
+j 5
+w 3
+j 16
+w 10
+j 14
+j 28
+w 40
+j 13
+j 2
+j 22
+w 8
+rj 5
+j 2
+rj 21
+w 15
+rj 17
+j 1
+rj 20
+w 30
+j 20
+w 10
+rj 15
+j 1
+w 5
+rj 17
+w 2
+j 18
+
+j 3
+rj 22
+wait 7
+rj 22
+slide 1
+j 2
+w 3
+rj 19
+wait 9
+j 6
+
+rj 2
+wait 3
+rj 20
+wait 6
+rj 9
+
+rj 3
+wait 3
+j 19
+wait 10
+j 6
+
+rj 1
+j 20
+wait 10
+j 18
+
+-- End
+rj 2
+wait 3
+j 20
+wait 10
+j 15
+
+j 2
+wait 5
+j 18
+wait 32
+j 18
+wait 45
+j 4
+
+j 1
+wait 1
+rj 23
+rj 15
+
+rj 2
+j 20
+wait 10
+j 10
+
+
+j 1
+wait 8
+j 12
+rj 9
+rj 1
+rj 22
+rj 16
+
+slide 1
+j 1
+wait 11
+rj 11
+wait 2
+j 5
+
+j 3
+wait 3
+j 20
+wait 40
+j 14
+
+rj 1
+wait 6
+j 16
+wait 25
+j 16
+
+slide 1
+rj 1
+wait 3
+rj 23
+j 21
+
+rj 13
+slide 1
+j 6
+wait 30
+rj 6
+wait 8
+rj 13
+wait 37
+j 1

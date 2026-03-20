@@ -2127,8 +2127,11 @@ public class TigerMothPlugin : BaseUnityPlugin
             if (System.Array.TrueForAll(_runTotals, t => t > 0)
                 && (_pbTotalTimes == null || totalTime < _pbTotalTimes[lastIdx]))
             {
+                float oldPbTotal = (_pbTotalTimes != null && _pbTotalTimes.Length > lastIdx)
+                    ? _pbTotalTimes[lastIdx]
+                    : -1f;
                 _pbTotalTimes = (float[])_runTotals.Clone();
-                SaveGhost();
+                SaveGhost(oldPbTotal > 0f ? (float?)oldPbTotal : null);
                 Logger.LogInfo("TigerMoth: New PB! " + FormatTime(totalTime));
             }
         }
@@ -2391,14 +2394,37 @@ public class TigerMothPlugin : BaseUnityPlugin
     }
 
 
-    private void SaveGhost()
+    private static string GhostArchivePath(float pbTime, int duplicateIndex)
+    {
+        string baseName = "TigerMoth_ghost_" + pbTime.ToString("F2", CultureInfo.InvariantCulture);
+        if (duplicateIndex > 0)
+            baseName += "_" + duplicateIndex;
+        return Path.Combine(BepInEx.Paths.ConfigPath, baseName + ".bin");
+    }
+
+    private void SaveGhost(float? previousPbTotal)
     {
         if (_ghostRecording == null || _ghostRecording.Count == 0)
             return;
         try
         {
             var frames = _ghostRecording.ToArray();
-            WriteGhostFrames(GhostPath(), frames);
+            string currentPath = GhostPath();
+            if (previousPbTotal.HasValue && File.Exists(currentPath))
+            {
+                int duplicateIndex = 0;
+                string archivePath = GhostArchivePath(previousPbTotal.Value, duplicateIndex);
+                while (File.Exists(archivePath))
+                {
+                    duplicateIndex++;
+                    archivePath = GhostArchivePath(previousPbTotal.Value, duplicateIndex);
+                }
+
+                File.Move(currentPath, archivePath);
+                Logger.LogInfo("TigerMoth: archived previous PB ghost to " + archivePath);
+            }
+
+            WriteGhostFrames(currentPath, frames);
             _ghostPlaybackFrames = frames;
             Logger.LogInfo("TigerMoth: PB ghost saved (" + frames.Length + " frames)");
         }
