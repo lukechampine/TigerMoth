@@ -33,6 +33,8 @@ public class TigerMothPlugin : BaseUnityPlugin
         static void Prefix()
         {
             if (_instance == null) return;
+            if (_instance._runActive && !_instance._practiceMode && !_instance._tasMode)
+                _instance.SaveAttempt();
             _instance.StopTasPlayback();
             _instance._tasMode = _instance._tasArmedAfterReset;
             _instance._replayActive = false;
@@ -360,6 +362,7 @@ public class TigerMothPlugin : BaseUnityPlugin
     private List<Split> _managedSplits = new List<Split>();
     private int _currentSplitIndex = -1;
     private bool _runActive;
+    private int _attemptNumber;
 
     // Area triggers — colliders for position-based split detection
     private Dictionary<string, Collider2D> _areaColliders = new Dictionary<string, Collider2D>();
@@ -463,6 +466,8 @@ public class TigerMothPlugin : BaseUnityPlugin
 
             if (!_pendingLoad)
             {
+                if (_runActive && !_practiceMode && !_tasMode)
+                    SaveAttempt();
                 _zoomSteps = 0;
                 _practiceMode = false;
                 _tasMode = false;
@@ -1991,6 +1996,8 @@ public class TigerMothPlugin : BaseUnityPlugin
         // Detect run was reset (splits destroyed externally, e.g. game restart)
         if (_runActive && (_managedSplits.Count == 0 || _managedSplits[0] == null))
         {
+            if (!_practiceMode && !_tasMode)
+                SaveAttempt();
             StopReplay();
             StopTasPlayback();
             _runActive = false;
@@ -2181,6 +2188,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         // Check for PB only in normal mode (practice runs skip splits)
         if (!IsSegmentMode())
         {
+            SaveAttempt();
             if (System.Array.TrueForAll(_runTotals, t => t > 0)
                 && (_pbTotalTimes == null || totalTime < _pbTotalTimes[lastIdx]))
             {
@@ -2545,6 +2553,48 @@ public class TigerMothPlugin : BaseUnityPlugin
         catch (System.Exception e)
         {
             Logger.LogError("TigerMoth: failed to save TAS split ghost " + splitIndex + ": " + e.Message);
+        }
+    }
+
+    // ── Attempt recording ─────────────────────────────────
+
+    private static string AttemptsDir()
+    {
+        return Path.Combine(BepInEx.Paths.ConfigPath, "TigerMoth_attempts");
+    }
+
+    private void SaveAttempt()
+    {
+        if (_ghostRecording == null || _ghostRecording.Count < 30)
+            return; // skip trivially short attempts (< 0.5 seconds)
+        try
+        {
+            string dir = AttemptsDir();
+            if (!Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            if (_attemptNumber == 0)
+            {
+                // Resume numbering from existing files
+                foreach (string file in Directory.GetFiles(dir, "attempt_*.bin"))
+                {
+                    string[] parts = Path.GetFileNameWithoutExtension(file).Split('_');
+                    int num;
+                    if (parts.Length >= 2 && int.TryParse(parts[1], out num) && num > _attemptNumber)
+                        _attemptNumber = num;
+                }
+            }
+            _attemptNumber++;
+
+            string timestamp = System.DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+            string filename = "attempt_" + _attemptNumber.ToString("D4") + "_" + timestamp + ".bin";
+            var frames = _ghostRecording.ToArray();
+            WriteGhostFrames(Path.Combine(dir, filename), frames);
+            Logger.LogInfo("TigerMoth: attempt " + _attemptNumber + " saved (" + frames.Length + " frames)");
+        }
+        catch (System.Exception e)
+        {
+            Logger.LogError("TigerMoth: failed to save attempt: " + e.Message);
         }
     }
 
@@ -3305,7 +3355,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         float abs = Mathf.Abs(delta);
         string absFmt = abs.ToString("F2");
         string sign = delta >= 0 ? "+" : "\u2212";
-        string secs = sign + abs.ToString("F0");
+        string secs = sign + Mathf.FloorToInt(abs).ToString();
         string decs = "." + absFmt.Substring(absFmt.IndexOf('.') + 1);
 
         _reusableContent.text = decs;
