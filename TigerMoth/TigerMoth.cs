@@ -11,7 +11,7 @@ using UnityEngine.SceneManagement;
 [BepInPlugin("com.speedrun.tigermoth", "TigerMoth", Version)]
 public class TigerMothPlugin : BaseUnityPlugin
 {
-    const string Version = "1.1.0";
+    const string Version = "1.2.0";
 
     // ── Split definitions (hardcoded order) ───────────────
     private static readonly string[] SplitNames = { "Church", "Gift", "Tower", "End" };
@@ -214,6 +214,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         Off,
     }
 
+
     private enum TasCommandType
     {
         Wait,
@@ -368,6 +369,23 @@ public class TigerMothPlugin : BaseUnityPlugin
     private int _practiceSkipIndex;
     private bool _tasMode;
 
+    // Input display — per-jump charge tracking
+    private float _jumpCharge1;
+    private float _jumpCharge2;
+    private float _prevChargingTime;
+    private int _prevJumpsValue = -1;
+    private bool _jumpFiredStaleCharge;
+    private bool _chargeDisplayCleared;
+    private float _cachedChargingTime;
+    private int _cachedJumps;
+    private int _cachedMaxJumps;
+
+    // Input display mode: false = arrows only, true = arrows + charge + vel/norm
+    private bool _inputDetailMode;
+
+    // Collider visualization
+    private bool _showColliders;
+
     // Camera zoom (offset applied via Harmony patch on AdvancedCamera.Update)
     private int _zoomSteps;
 
@@ -494,15 +512,12 @@ public class TigerMothPlugin : BaseUnityPlugin
                         if (col != null)
                         {
                             _areaColliders[areaName] = col;
-                            Logger.LogInfo("TigerMoth: found trigger collider for " + areaName);
                         }
                         else
                             Logger.LogWarning("TigerMoth: '" + areaName + "' has no Collider2D");
                     }
                 }
             }
-
-            Logger.LogInfo("TigerMoth found MothController");
 
             // Create ghost moth — build from scratch, sprites only
             if (_ghost == null)
@@ -522,7 +537,6 @@ public class TigerMothPlugin : BaseUnityPlugin
 
                 // Hide until a run starts with playback data
                 _ghost.SetActive(false);
-                Logger.LogInfo("TigerMoth: ghost moth spawned");
             }
         }
 
@@ -544,6 +558,44 @@ public class TigerMothPlugin : BaseUnityPlugin
         }
 
         ManageSplits();
+
+        // Track jump charge for input display
+        if (_chargingTimeField != null && _jumpsField != null && _maxJumpsField != null)
+        {
+            float ct = (float)_chargingTimeField.GetValue(_moth);
+            int curJumps = (int)_jumpsField.GetValue(_moth);
+            int maxJumps = (int)_maxJumpsField.GetValue(_moth);
+
+            // Clear stale flag from previous frame (check before set to avoid same-frame flicker)
+            if (_jumpFiredStaleCharge && ct != _prevChargingTime)
+                _jumpFiredStaleCharge = false;
+
+            if (_prevJumpsValue >= 0 && curJumps < _prevJumpsValue)
+            {
+                // A jump was fired — which slot?
+                int jumpNumber = maxJumps - curJumps;
+                if (jumpNumber == 1)
+                    _jumpCharge1 = _prevChargingTime;
+                else
+                    _jumpCharge2 = _prevChargingTime;
+                _jumpFiredStaleCharge = true;
+                _chargeDisplayCleared = false;
+            }
+
+            // Clear both slots when actively charging a new first jump
+            if (!_jumpFiredStaleCharge && ct > 0f && curJumps == maxJumps && !_chargeDisplayCleared)
+            {
+                _jumpCharge1 = 0f;
+                _jumpCharge2 = 0f;
+                _chargeDisplayCleared = true;
+            }
+
+            _prevJumpsValue = curJumps;
+            _prevChargingTime = ct;
+            _cachedChargingTime = ct;
+            _cachedJumps = curJumps;
+            _cachedMaxJumps = maxJumps;
+        }
 
         if (Input.GetKeyDown(KeyCode.T))
         {
@@ -691,6 +743,14 @@ public class TigerMothPlugin : BaseUnityPlugin
 
 
 
+        if (Input.GetKeyDown(KeyCode.V))
+            _inputDetailMode = !_inputDetailMode;
+
+        if (Input.GetKeyDown(KeyCode.C))
+        {
+            _showColliders = !_showColliders;
+        }
+
         if (Input.GetKeyDown(KeyCode.F))
             StartReplay();
 
@@ -811,7 +871,6 @@ public class TigerMothPlugin : BaseUnityPlugin
         }
 
         ApplyGhostVisibility();
-        Logger.LogInfo("TigerMoth: ghost mode = " + GhostDisplayModeLabel(_ghostDisplayMode));
     }
 
     private void StartReplay()
@@ -851,7 +910,6 @@ public class TigerMothPlugin : BaseUnityPlugin
             _splitTickingField.SetValue(_managedSplits[_currentSplitIndex], true);
         }
 
-        Logger.LogInfo("TigerMoth: replay started (" + frames.Length + " frames)");
     }
 
     private void StopReplay()
@@ -874,7 +932,6 @@ public class TigerMothPlugin : BaseUnityPlugin
         }
 
         _replayFrames = null;
-        Logger.LogInfo("TigerMoth: replay ended");
     }
 
     private void TriggerTasResetAndPlayback()
@@ -2590,14 +2647,201 @@ public class TigerMothPlugin : BaseUnityPlugin
         };
     }
 
+    // ── Collider visualization ──────────────────────────────
+
+    private void DrawColliders()
+    {
+        if (!_showColliders || _moth == null || Camera.main == null)
+            return;
+        if (Event.current.type != EventType.Repaint)
+            return;
+
+        var cam = Camera.main;
+        var mothColliders = new HashSet<Collider2D>(_moth.GetComponentsInChildren<Collider2D>());
+        Color mothColor = new Color(0f, 1f, 0f, 0.85f);
+        Color stageColor = new Color(1f, 0.3f, 0.3f, 0.7f);
+        Color triggerColor = new Color(1f, 1f, 0.2f, 0.4f);
+
+        foreach (var col in FindObjectsOfType<Collider2D>())
+        {
+            if (!col.enabled || !col.gameObject.activeInHierarchy)
+                continue;
+
+            Color color;
+            if (mothColliders.Contains(col))
+                color = mothColor;
+            else if (col.isTrigger)
+                color = triggerColor;
+            else
+                color = stageColor;
+
+            DrawCollider2DScreen(cam, col, color);
+        }
+    }
+
+    private void DrawCollider2DScreen(Camera cam, Collider2D col, Color color)
+    {
+        if (col is BoxCollider2D box)
+        {
+            var t = box.transform;
+            Vector2 half = box.size * 0.5f;
+            Vector2 o = box.offset;
+            Vector2 tl = WorldToGUI(cam, t.TransformPoint(new Vector2(o.x - half.x, o.y + half.y)));
+            Vector2 tr = WorldToGUI(cam, t.TransformPoint(new Vector2(o.x + half.x, o.y + half.y)));
+            Vector2 br = WorldToGUI(cam, t.TransformPoint(new Vector2(o.x + half.x, o.y - half.y)));
+            Vector2 bl = WorldToGUI(cam, t.TransformPoint(new Vector2(o.x - half.x, o.y - half.y)));
+            DrawGUILine(tl, tr, color); DrawGUILine(tr, br, color);
+            DrawGUILine(br, bl, color); DrawGUILine(bl, tl, color);
+        }
+        else if (col is CircleCollider2D circle)
+        {
+            var t = circle.transform;
+            Vector3 center = t.TransformPoint(circle.offset);
+            float radius = circle.radius * Mathf.Max(Mathf.Abs(t.lossyScale.x), Mathf.Abs(t.lossyScale.y));
+            const int segments = 32;
+            float step = 2f * Mathf.PI / segments;
+            Vector2 prev = WorldToGUI(cam, center + new Vector3(radius, 0f, 0f));
+            for (int i = 1; i <= segments; i++)
+            {
+                float angle = i * step;
+                Vector2 next = WorldToGUI(cam, center + new Vector3(Mathf.Cos(angle) * radius, Mathf.Sin(angle) * radius, 0f));
+                DrawGUILine(prev, next, color);
+                prev = next;
+            }
+        }
+        else if (col is PolygonCollider2D poly)
+        {
+            var t = poly.transform;
+            for (int p = 0; p < poly.pathCount; p++)
+            {
+                var points = poly.GetPath(p);
+                for (int i = 0; i < points.Length; i++)
+                {
+                    Vector2 a = WorldToGUI(cam, t.TransformPoint(points[i]));
+                    Vector2 b = WorldToGUI(cam, t.TransformPoint(points[(i + 1) % points.Length]));
+                    DrawGUILine(a, b, color);
+                }
+            }
+        }
+        else if (col is EdgeCollider2D edge)
+        {
+            var t = edge.transform;
+            var points = edge.points;
+            for (int i = 0; i < points.Length - 1; i++)
+            {
+                Vector2 a = WorldToGUI(cam, t.TransformPoint(points[i]));
+                Vector2 b = WorldToGUI(cam, t.TransformPoint(points[i + 1]));
+                DrawGUILine(a, b, color);
+            }
+        }
+        else if (col is CapsuleCollider2D capsule)
+        {
+            var t = capsule.transform;
+            Vector2 o = capsule.offset;
+            Vector2 sz = capsule.size;
+            bool vertical = capsule.direction == CapsuleDirection2D.Vertical;
+            float halfW = sz.x * 0.5f;
+            float halfH = sz.y * 0.5f;
+            float radius = vertical ? halfW : halfH;
+            float straight = vertical ? Mathf.Max(0f, halfH - radius) : Mathf.Max(0f, halfW - radius);
+            const int capSegs = 16;
+            if (vertical)
+            {
+                Vector2 tlS = WorldToGUI(cam, t.TransformPoint(new Vector2(o.x - radius, o.y + straight)));
+                Vector2 blS = WorldToGUI(cam, t.TransformPoint(new Vector2(o.x - radius, o.y - straight)));
+                Vector2 trS = WorldToGUI(cam, t.TransformPoint(new Vector2(o.x + radius, o.y + straight)));
+                Vector2 brS = WorldToGUI(cam, t.TransformPoint(new Vector2(o.x + radius, o.y - straight)));
+                DrawGUILine(tlS, blS, color); DrawGUILine(trS, brS, color);
+                DrawArcScreen(cam, t, o + new Vector2(0f, straight), radius, 0f, Mathf.PI, capSegs, color);
+                DrawArcScreen(cam, t, o + new Vector2(0f, -straight), radius, Mathf.PI, 2f * Mathf.PI, capSegs, color);
+            }
+            else
+            {
+                Vector2 tlS = WorldToGUI(cam, t.TransformPoint(new Vector2(o.x - straight, o.y + radius)));
+                Vector2 trS = WorldToGUI(cam, t.TransformPoint(new Vector2(o.x + straight, o.y + radius)));
+                Vector2 blS = WorldToGUI(cam, t.TransformPoint(new Vector2(o.x - straight, o.y - radius)));
+                Vector2 brS = WorldToGUI(cam, t.TransformPoint(new Vector2(o.x + straight, o.y - radius)));
+                DrawGUILine(tlS, trS, color); DrawGUILine(blS, brS, color);
+                DrawArcScreen(cam, t, o + new Vector2(straight, 0f), radius, -Mathf.PI * 0.5f, Mathf.PI * 0.5f, capSegs, color);
+                DrawArcScreen(cam, t, o + new Vector2(-straight, 0f), radius, Mathf.PI * 0.5f, Mathf.PI * 1.5f, capSegs, color);
+            }
+        }
+        else if (col is CompositeCollider2D composite)
+        {
+            var t = composite.transform;
+            for (int p = 0; p < composite.pathCount; p++)
+            {
+                int count = composite.GetPathPointCount(p);
+                var points = new Vector2[count];
+                composite.GetPath(p, points);
+                for (int i = 0; i < count; i++)
+                {
+                    Vector2 a = WorldToGUI(cam, t.TransformPoint(points[i]));
+                    Vector2 b = WorldToGUI(cam, t.TransformPoint(points[(i + 1) % count]));
+                    DrawGUILine(a, b, color);
+                }
+            }
+        }
+    }
+
+    private void DrawArcScreen(Camera cam, Transform t, Vector2 center, float radius, float startAngle, float endAngle, int segments, Color color)
+    {
+        float step = (endAngle - startAngle) / segments;
+        Vector2 prev = WorldToGUI(cam, t.TransformPoint(center + new Vector2(Mathf.Cos(startAngle) * radius, Mathf.Sin(startAngle) * radius)));
+        for (int i = 1; i <= segments; i++)
+        {
+            float angle = startAngle + i * step;
+            Vector2 next = WorldToGUI(cam, t.TransformPoint(center + new Vector2(Mathf.Cos(angle) * radius, Mathf.Sin(angle) * radius)));
+            DrawGUILine(prev, next, color);
+            prev = next;
+        }
+    }
+
+    private static Vector2 WorldToGUI(Camera cam, Vector3 world)
+    {
+        Vector3 screen = cam.WorldToScreenPoint(world);
+        return new Vector2(screen.x, Screen.height - screen.y);
+    }
+
+    private static Texture2D _lineTex;
+
+    private static void DrawGUILine(Vector2 a, Vector2 b, Color color)
+    {
+        if (_lineTex == null)
+        {
+            _lineTex = new Texture2D(1, 1);
+            _lineTex.SetPixel(0, 0, Color.white);
+            _lineTex.Apply();
+        }
+
+        var savedColor = GUI.color;
+        GUI.color = color;
+
+        float dx = b.x - a.x;
+        float dy = b.y - a.y;
+        float len = Mathf.Sqrt(dx * dx + dy * dy);
+        if (len < 0.5f) { GUI.color = savedColor; return; }
+
+        float angle = Mathf.Atan2(dy, dx) * Mathf.Rad2Deg;
+
+        var pivot = a;
+        var savedMatrix = GUI.matrix;
+        GUIUtility.RotateAroundPivot(angle, pivot);
+        GUI.DrawTexture(new Rect(a.x, a.y - 0.5f, len, 2f), _lineTex);
+        GUI.matrix = savedMatrix;
+
+        GUI.color = savedColor;
+    }
+
     // ── GUI ───────────────────────────────────────────────
 
     private static readonly string[][] OverlayBindings = {
         new[] { "H", "Save" },
         new[] { "I", "Load" },
         new[] { "1-5", "Checkpoints" },
-        new[] { "T", "Run ttf.tas" },
         new[] { "F", "Follow ghost" },
+        new[] { "V", "Detail view" },
+        new[] { "C", "Colliders" },
         new[] { "G", "Cycle ghost" },
         new[] { "[", "Zoom in" },
         new[] { "]", "Zoom out" },
@@ -2666,6 +2910,12 @@ public class TigerMothPlugin : BaseUnityPlugin
         // ── Split timer table (top-right) ──
         if (_runActive && _managedSplits.Count > 0)
             DrawSplitTable();
+
+        // ── Input & physics display (bottom-left) ──
+        DrawInputDisplay();
+
+        // ── Collider visualization ──
+        DrawColliders();
     }
 
     private void DrawOverlay()
@@ -2704,6 +2954,170 @@ public class TigerMothPlugin : BaseUnityPlugin
                 OverlayBindings[i][1], _actionStyle);
             cy += rowH;
         }
+    }
+
+    private GUIStyle _inputLabelStyle;
+    private GUIStyle _inputMonoStyle;
+    private GUIStyle _inputBtnStyle;
+    private GUIStyle _inputBtnActiveStyle;
+    private Texture2D _inputBtnTex;
+    private Texture2D _inputBtnActiveTex;
+
+    private void DrawInputDisplay()
+    {
+        if (_moth == null || _rb == null) return;
+
+        if (_inputLabelStyle == null)
+        {
+            _inputLabelStyle = new GUIStyle(GUI.skin.label);
+            _inputLabelStyle.fontSize = 28;
+            _inputLabelStyle.normal.textColor = new Color(1f, 1f, 1f, 0.85f);
+            _inputLabelStyle.alignment = TextAnchor.MiddleLeft;
+
+            _inputMonoStyle = new GUIStyle(_inputLabelStyle);
+            _inputMonoStyle.alignment = TextAnchor.MiddleRight;
+
+            _inputBtnTex = MakeSolidTexture(new Color(1f, 1f, 1f, 0.15f));
+            _inputBtnActiveTex = MakeSolidTexture(new Color(1f, 1f, 1f, 0.6f));
+
+            _inputBtnStyle = new GUIStyle(GUI.skin.label);
+            _inputBtnStyle.fontSize = 24;
+            _inputBtnStyle.fontStyle = FontStyle.Bold;
+            _inputBtnStyle.alignment = TextAnchor.MiddleCenter;
+            _inputBtnStyle.normal.textColor = new Color(1f, 1f, 1f, 0.4f);
+            _inputBtnStyle.normal.background = _inputBtnTex;
+
+            _inputBtnActiveStyle = new GUIStyle(_inputBtnStyle);
+            _inputBtnActiveStyle.normal.textColor = new Color(0f, 0f, 0f, 0.9f);
+            _inputBtnActiveStyle.normal.background = _inputBtnActiveTex;
+        }
+
+        var controls = InputManager.controls;
+        float h = controls != null ? controls.GetAxis("LookHorizontal") : 0f;
+        float v = controls != null ? controls.GetAxis("LookVertical") : 0f;
+
+        const float btnSize = 42f;
+        const float btnGap = 4f;
+        const float pad = 10f;
+        float dpadW = (btnSize + btnGap) * 3 - btnGap;
+        float dpadH = btnSize * 3 + btnGap * 2;
+
+        float panelW, panelH;
+        if (_inputDetailMode)
+        {
+            panelW = 340f;
+            panelH = pad + dpadH + 8f + 32f + 32f + pad;
+        }
+        else
+        {
+            panelW = pad * 2 + dpadW;
+            panelH = pad * 2 + dpadH;
+        }
+
+        float px = 10f;
+        float py = Screen.height - panelH - 10f;
+
+        GUI.Box(new Rect(px, py, panelW, panelH), GUIContent.none, _panelBgStyle);
+
+        float cx = px + pad;
+        float cy = py + pad;
+
+        // D-pad: 3x3 grid, only up/down/left/right
+        float gridX = cx;
+        float gridY = cy;
+
+        bool up = v > 0.1f;
+        bool down = v < -0.1f;
+        bool left = h < -0.1f;
+        bool right = h > 0.1f;
+
+        GUI.Box(new Rect(gridX + btnSize + btnGap, gridY, btnSize, btnSize),
+            "\u25B2", up ? _inputBtnActiveStyle : _inputBtnStyle);
+        GUI.Box(new Rect(gridX, gridY + btnSize + btnGap, btnSize, btnSize),
+            "\u25C0", left ? _inputBtnActiveStyle : _inputBtnStyle);
+        GUI.Box(new Rect(gridX + (btnSize + btnGap) * 2, gridY + btnSize + btnGap, btnSize, btnSize),
+            "\u25B6", right ? _inputBtnActiveStyle : _inputBtnStyle);
+        GUI.Box(new Rect(gridX + btnSize + btnGap, gridY + (btnSize + btnGap) * 2, btnSize, btnSize),
+            "\u25BC", down ? _inputBtnActiveStyle : _inputBtnStyle);
+
+        if (!_inputDetailMode)
+            return;
+
+        // Jump charge to the right of the d-pad
+        float chargeX = gridX + (btnSize + btnGap) * 3 + 12f;
+        float chargeY = gridY;
+        float currentCharge = _cachedChargingTime;
+        bool charging = currentCharge > 0f && !_jumpFiredStaleCharge;
+        bool chargingJump1 = charging && _cachedJumps == _cachedMaxJumps;
+        bool chargingJump2 = charging && _cachedJumps < _cachedMaxJumps && _cachedMaxJumps >= 2;
+
+        float display1 = chargingJump1 ? currentCharge : _jumpCharge1;
+        float display2 = chargingJump2 ? currentCharge : _jumpCharge2;
+
+        GUI.Label(new Rect(chargeX, chargeY, 100f, 32f), "charge", _inputLabelStyle);
+        chargeY += 28f;
+        GUI.Label(new Rect(chargeX, chargeY, 100f, 32f),
+            display1 > 0f ? string.Format("{0:F3}s", display1) : "---",
+            ChargeStyle(display1, chargingJump1));
+        chargeY += 28f;
+        GUI.Label(new Rect(chargeX, chargeY, 100f, 32f),
+            display2 > 0f ? string.Format("{0:F3}s", display2) : "---",
+            ChargeStyle(display2, chargingJump2));
+
+        cy = gridY + dpadH + 8f;
+
+        // Velocity & normalized velocity — fixed columns
+        Vector2 vel = _rb.velocity;
+        const float colLabel = 0f;
+        const float labelW = 80f;
+        const float colX = 85f;
+        const float colY = 190f;
+        const float colW = 90f;
+        const float rowHPhys = 32f;
+
+        GUI.Label(new Rect(cx + colLabel, cy, labelW, rowHPhys), "vel", _inputLabelStyle);
+        GUI.Label(new Rect(cx + colX, cy, colW, rowHPhys), string.Format("{0:F2}", vel.x), _inputMonoStyle);
+        GUI.Label(new Rect(cx + colY, cy, colW, rowHPhys), string.Format("{0:F2}", vel.y), _inputMonoStyle);
+        cy += rowHPhys;
+
+        Vector2 norm = vel.sqrMagnitude > 0.0001f ? vel.normalized : Vector2.zero;
+        GUI.Label(new Rect(cx + colLabel, cy, labelW, rowHPhys), "norm", _inputLabelStyle);
+        GUI.Label(new Rect(cx + colX, cy, colW, rowHPhys), string.Format("{0:F2}", norm.x), _inputMonoStyle);
+        GUI.Label(new Rect(cx + colY, cy, colW, rowHPhys), string.Format("{0:F2}", norm.y), _inputMonoStyle);
+    }
+
+    private GUIStyle _chargeColorStyle;
+
+    private GUIStyle ChargeStyle(float charge, bool isLive)
+    {
+        const float maxCT = 0.7f;
+        if (charge <= 0f)
+            return _inputLabelStyle;
+
+        float frac = (charge / maxCT) % 1f;
+        int cycle = Mathf.FloorToInt(charge / maxCT);
+        float effective = (cycle % 2 == 0) ? frac : 1f - frac;
+        float distFromPeak = (1f - effective) * maxCT;
+
+        Color color;
+        if (distFromPeak <= 0.02f)
+            color = new Color(0.2f, 1f, 0.2f, 0.9f);
+        else if (distFromPeak <= 0.05f)
+            color = new Color(1f, 1f, 0.2f, 0.9f);
+        else if (distFromPeak <= 0.1f)
+            color = new Color(1f, 0.6f, 0.1f, 0.9f);
+        else if (isLive)
+            color = new Color(1f, 1f, 1f, 0.85f);
+        else
+            return _inputLabelStyle;
+
+        if (_chargeColorStyle == null)
+        {
+            _chargeColorStyle = new GUIStyle(_inputLabelStyle);
+            _chargeColorStyle.fontStyle = FontStyle.Bold;
+        }
+        _chargeColorStyle.normal.textColor = color;
+        return _chargeColorStyle;
     }
 
     private static readonly Color ColorAhead = new Color(0.27f, 1f, 0.27f);
