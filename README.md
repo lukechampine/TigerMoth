@@ -48,9 +48,15 @@ If something seems clearly wrong, open an issue!
 
 ## Install (pre-built)
 
-1. Install [BepInEx 5.x for macOS](https://github.com/BepInEx/BepInEx/releases) into your game directory
+1. Install [BepInEx 5.x](https://github.com/BepInEx/BepInEx/releases) into your game directory
 2. Copy `TigerMoth.dll` into `BepInEx/plugins/TigerMoth/`
 3. Launch with `./run_bepinex.sh`
+
+Note that MacOS, being a Real Operating System that is Made For Adults, will
+probably try to prevent you from running software that you want to run. You may
+need to perform various rites and rituals to satisfy it. Honestly I don't know
+exactly what you'll need to do; my recommendation is to ask Claude or ChatGPT to
+walk you through it.
 
 ## Build from source
 
