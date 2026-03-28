@@ -43,6 +43,7 @@ public class TigerMothPlugin : BaseUnityPlugin
             _instance._managedSplits.Clear();
             _instance._currentSplitIndex = -1;
             _instance._ghostRecording = null;
+            _instance.ClearTapState();
         }
     }
 
@@ -213,6 +214,7 @@ public class TigerMothPlugin : BaseUnityPlugin
     {
         HumanBest,
         TasBest,
+        AttemptSwarm,
         Off,
     }
 
@@ -269,6 +271,14 @@ public class TigerMothPlugin : BaseUnityPlugin
     private GhostFrame[] _ghostActivePlayback;   // current playback source
     private int _ghostPlaybackIndex;
     private GhostDisplayMode _ghostDisplayMode = GhostDisplayMode.HumanBest;
+    private GhostFrame[] _tapGhostFrames;          // TAP best ghost
+    private float _tapBestTime;
+
+    // Attempt swarm ghost
+    private List<GhostFrame[]> _attemptFrames;       // all loaded attempts
+    private List<GameObject> _attemptGhosts;          // ghost sprites per attempt
+    private bool _attemptSwarmActive;
+
     private bool _replayActive;
     private GhostFrame[] _replayFrames;
     private int _replayIndex;
@@ -386,8 +396,15 @@ public class TigerMothPlugin : BaseUnityPlugin
     // Input display mode: false = arrows only, true = arrows + charge + vel/norm
     private bool _inputDetailMode;
 
-    // Collider visualization
-    private bool _showColliders;
+    // Touch All Platforms mode
+    private bool _tapMode;
+    private bool _tapArmedAfterReset;
+    private HashSet<Collider2D> _tapPlatforms;
+    private HashSet<Collider2D> _tapTouchedPlatforms;
+    private int _tapTotalCount;
+    private float _tapTimer;
+    private bool _tapTimerRunning;
+    private bool _tapComplete;
 
     // Camera zoom (offset applied via Harmony patch on AdvancedCamera.Update)
     private int _zoomSteps;
@@ -477,6 +494,8 @@ public class TigerMothPlugin : BaseUnityPlugin
                 _managedSplits.Clear();
                 _currentSplitIndex = -1;
                 _ghostRecording = null;
+                ClearTapState();
+                DestroyAttemptGhosts();
             }
 
             _splitsRunningField = typeof(SpeedrunSplits).GetField("running", flags);
@@ -559,6 +578,8 @@ public class TigerMothPlugin : BaseUnityPlugin
             }
             if (_pendingRestore != null)
                 ApplyState();
+            if (_tapArmedAfterReset)
+                StartTapMode();
             return;
         }
 
@@ -634,11 +655,18 @@ public class TigerMothPlugin : BaseUnityPlugin
 
         if (Input.GetKeyDown(KeyCode.P))
         {
-            bool clearPrefix = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
-            if (clearPrefix)
-                ClearManualTasPrefix();
+            if (_tasMode || _tasPlaybackActive)
+            {
+                bool clearPrefix = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+                if (clearPrefix)
+                    ClearManualTasPrefix();
+                else
+                    SetTasPrefixFromCurrentFrame();
+            }
             else
-                SetTasPrefixFromCurrentFrame();
+            {
+                ToggleTapMode();
+            }
         }
 
         // Replay mode: drive moth from recorded frames
@@ -681,8 +709,13 @@ public class TigerMothPlugin : BaseUnityPlugin
                 // Normal mode: PB exhausted, done
                 StopReplay();
             }
+            _ghostPlaybackIndex++;
+            TickAttemptSwarm();
             return;
         }
+
+        // Touch All Platforms: tick
+        TickTapMode();
 
         // Ghost: record frame
         if (_runActive && _ghostRecording != null)
@@ -729,6 +762,9 @@ public class TigerMothPlugin : BaseUnityPlugin
             _ghost.SetActive(false);
         }
 
+        // Attempt swarm: playback
+        TickAttemptSwarm();
+
         if (Input.GetKeyDown(KeyCode.H))
             SaveState();
 
@@ -750,11 +786,6 @@ public class TigerMothPlugin : BaseUnityPlugin
 
         if (Input.GetKeyDown(KeyCode.V))
             _inputDetailMode = !_inputDetailMode;
-
-        if (Input.GetKeyDown(KeyCode.C))
-        {
-            _showColliders = !_showColliders;
-        }
 
         if (Input.GetKeyDown(KeyCode.F))
             StartReplay();
@@ -808,6 +839,8 @@ public class TigerMothPlugin : BaseUnityPlugin
                 return "Human";
             case GhostDisplayMode.TasBest:
                 return "TAS";
+            case GhostDisplayMode.AttemptSwarm:
+                return "Swarm";
             default:
                 return "Off";
         }
@@ -821,6 +854,8 @@ public class TigerMothPlugin : BaseUnityPlugin
                 return _ghostPlaybackFrames;
             case GhostDisplayMode.TasBest:
                 return _tasGhostPlaybackFrames;
+            case GhostDisplayMode.AttemptSwarm:
+                return _ghostPlaybackFrames; // follow PB in swarm mode
             default:
                 return null;
         }
@@ -852,6 +887,7 @@ public class TigerMothPlugin : BaseUnityPlugin
 
         bool canShow = !_replayActive
             && _ghostDisplayMode != GhostDisplayMode.Off
+            && _ghostDisplayMode != GhostDisplayMode.AttemptSwarm
             && _ghostActivePlayback != null
             && _ghostPlaybackIndex < _ghostActivePlayback.Length;
         _ghost.SetActive(canShow);
@@ -859,9 +895,35 @@ public class TigerMothPlugin : BaseUnityPlugin
 
     private void CycleGhostDisplayMode()
     {
-        _ghostDisplayMode = (GhostDisplayMode)(((int)_ghostDisplayMode + 1) % 3);
+        _ghostDisplayMode = (GhostDisplayMode)(((int)_ghostDisplayMode + 1) % 4);
 
-        if (_runActive)
+        // Manage attempt swarm
+        if (_ghostDisplayMode == GhostDisplayMode.AttemptSwarm)
+        {
+            if (_attemptFrames == null)
+                LoadAllAttempts();
+            if (_attemptFrames.Count == 0)
+            {
+                // Skip swarm mode if no attempts
+                _ghostDisplayMode = GhostDisplayMode.Off;
+            }
+            else
+            {
+                _attemptSwarmActive = true;
+                CreateAttemptGhosts();
+                ShowAttemptGhosts(true);
+            }
+        }
+        else
+        {
+            if (_attemptSwarmActive)
+            {
+                _attemptSwarmActive = false;
+                ShowAttemptGhosts(false);
+            }
+        }
+
+        if (_runActive && _ghostDisplayMode != GhostDisplayMode.AttemptSwarm)
         {
             int previousIndex = _ghostPlaybackIndex;
             _ghostActivePlayback = IsSegmentMode()
@@ -902,10 +964,13 @@ public class TigerMothPlugin : BaseUnityPlugin
         _replayFrames = frames;
         _replayIndex = 0;
         _replayActive = true;
+        _ghostPlaybackIndex = 0;
 
         // Zero physics; Harmony prefix skips MothController.Update during replay
         _rb.velocity = Vector2.zero;
         if (_ghost != null) _ghost.SetActive(false);
+        if (_attemptSwarmActive)
+            ShowAttemptGhosts(true);
 
         // Reset the current split timer to 0 and ensure it ticks during replay
         if (_currentSplitIndex >= 0 && _currentSplitIndex < _managedSplits.Count
@@ -1964,6 +2029,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         _replayActive = false;
         _replayFrames = null;
         StopTasPlayback();
+        ClearTapState();
         if (!keepTasArmed)
         {
             _tasArmedAfterReset = false;
@@ -1974,6 +2040,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         _rb = null;
         _ghost = null;
         _ghostAnimator = null;
+        DestroyAttemptGhosts();
         _runActive = false;
         _managedSplits.Clear();
         _currentSplitIndex = -1;
@@ -2076,6 +2143,8 @@ public class TigerMothPlugin : BaseUnityPlugin
         _ghostRecording = new List<GhostFrame>(GhostRecordingInitialCapacity);
         _ghostSegmentStarts = new int[SplitNames.Length];
         _ghostPlaybackIndex = 0;
+        if (_attemptSwarmActive)
+            ShowAttemptGhosts(true);
 
         if (IsSegmentMode())
         {
@@ -2086,6 +2155,12 @@ public class TigerMothPlugin : BaseUnityPlugin
                 ? (_practiceSkipIndex < 0 ? 0 : _practiceSkipIndex + 1)
                 : 0;
             StartSegmentGhostPlayback(firstSplit);
+        }
+        else if (_tapMode)
+        {
+            // TAP mode: play TAP best ghost
+            _ghostActivePlayback = _tapGhostFrames;
+            ApplyGhostVisibility();
         }
         else
         {
@@ -2344,6 +2419,11 @@ public class TigerMothPlugin : BaseUnityPlugin
         return Path.Combine(BepInEx.Paths.ConfigPath, "TigerMoth_tas_" + splitIndex + ".bin");
     }
 
+    private static string TapGhostPath()
+    {
+        return Path.Combine(BepInEx.Paths.ConfigPath, "TigerMoth_tap_ghost.bin");
+    }
+
     private static void WriteGhostFrames(string path, GhostFrame[] frames)
     {
         using (var fs = File.Create(path))
@@ -2455,6 +2535,39 @@ public class TigerMothPlugin : BaseUnityPlugin
                 Logger.LogError("TigerMoth: failed to load TAS split ghost " + i + ": " + e.Message);
                 _tasSplitGhostFrames[i] = null;
             }
+        }
+
+        // TAP ghost
+        try
+        {
+            string tapPath = TapGhostPath();
+            if (File.Exists(tapPath))
+            {
+                _tapGhostFrames = ReadGhostFrames(tapPath);
+                Logger.LogInfo("TigerMoth: TAP ghost loaded (" + _tapGhostFrames.Length + " frames)");
+            }
+        }
+        catch (System.Exception e)
+        {
+            Logger.LogError("TigerMoth: failed to load TAP ghost: " + e.Message);
+            _tapGhostFrames = null;
+        }
+
+        // TAP best time
+        try
+        {
+            string timePath = Path.Combine(BepInEx.Paths.ConfigPath, "TigerMoth_tap_best.txt");
+            if (File.Exists(timePath))
+            {
+                float.TryParse(File.ReadAllText(timePath).Trim(),
+                    NumberStyles.Float, CultureInfo.InvariantCulture, out _tapBestTime);
+                if (_tapBestTime > 0f)
+                    Logger.LogInfo("TigerMoth: TAP best time: " + FormatTime(_tapBestTime));
+            }
+        }
+        catch (System.Exception e)
+        {
+            Logger.LogError("TigerMoth: failed to load TAP best time: " + e.Message);
         }
     }
 
@@ -2598,8 +2711,371 @@ public class TigerMothPlugin : BaseUnityPlugin
         }
     }
 
+    // ── Touch All Platforms ─────────────────────────────────
+
+    private void ToggleTapMode()
+    {
+        _tapArmedAfterReset = true;
+        _practiceMode = false;
+        _tasMode = false;
+        _pendingRestore = null;
+        ReloadAndRestore();
+    }
+
+    private void StartTapMode()
+    {
+        InitTapPlatforms();
+        _tapTouchedPlatforms = new HashSet<Collider2D>();
+        _tapTimer = 0f;
+        _tapTimerRunning = true;
+        _tapComplete = false;
+        _tapMode = true;
+        _tapArmedAfterReset = false;
+        Logger.LogInfo("TigerMoth: TAP mode ON (" + _tapTotalCount + " platforms)");
+    }
+
+    private static string ColliderKey(Collider2D col)
+    {
+        var t = col.transform;
+        var sb = new System.Text.StringBuilder();
+        var current = t;
+        while (current != null)
+        {
+            if (sb.Length > 0) sb.Insert(0, '/');
+            sb.Insert(0, current.name);
+            current = current.parent;
+        }
+        var c = col.bounds.center;
+        sb.Append('|');
+        sb.Append(c.x.ToString("F3", CultureInfo.InvariantCulture));
+        sb.Append(',');
+        sb.Append(c.y.ToString("F3", CultureInfo.InvariantCulture));
+        return sb.ToString();
+    }
+
+    private static readonly Vector2[] TapPlatformPositions =
+    {
+        new Vector2(-17.120f, 20.100f),
+        new Vector2(-21.730f, 17.520f),
+        new Vector2(-29.490f, -10.850f),
+        new Vector2(-9.606f, -4.655f),
+        new Vector2(-32.712f, -6.925f),
+        new Vector2(2.336f, 4.688f),
+        new Vector2(-36.890f, 0.290f),
+        new Vector2(-11.535f, 11.311f),
+        new Vector2(-30.640f, -0.650f),
+        new Vector2(-13.932f, 20.680f),
+        new Vector2(-11.302f, -20.700f),
+        new Vector2(-31.780f, 80.863f),
+        new Vector2(-22.230f, 97.055f),
+        new Vector2(-55.939f, -10.124f),
+        new Vector2(-40.731f, 40.410f),
+        new Vector2(-35.353f, 49.152f),
+        new Vector2(-22.230f, 50.613f),
+        new Vector2(5.934f, 27.552f),
+        new Vector2(-23.692f, -5.750f),
+        new Vector2(-30.089f, 52.400f),
+        new Vector2(-8.912f, -18.500f),
+        new Vector2(-39.777f, 55.238f),
+        new Vector2(-17.990f, 65.600f),
+        new Vector2(-32.040f, 85.201f),
+        new Vector2(-31.476f, 88.341f),
+        new Vector2(-25.988f, 91.253f),
+        new Vector2(-35.974f, 106.141f),
+        new Vector2(-15.439f, 60.800f),
+        new Vector2(0.212f, -16.566f),
+        new Vector2(-36.688f, 48.291f),
+        new Vector2(1.815f, 109.353f),
+        new Vector2(-23.002f, 68.690f),
+        new Vector2(-26.899f, 77.073f),
+        new Vector2(-31.060f, 15.013f),
+        new Vector2(-48.777f, 61.031f),
+        new Vector2(9.307f, 40.321f),
+        new Vector2(-35.943f, -10.410f),
+        new Vector2(-44.630f, -13.395f),
+        new Vector2(-32.165f, -7.374f),
+        new Vector2(-20.853f, 6.520f),
+        new Vector2(-15.477f, 14.670f),
+        new Vector2(-22.810f, 19.430f),
+        new Vector2(-41.860f, 0.990f),
+        new Vector2(-22.199f, 38.850f),
+        new Vector2(-14.775f, -3.776f),
+        new Vector2(-43.124f, 30.959f),
+        new Vector2(0.330f, 25.119f),
+        new Vector2(-29.830f, 23.666f),
+        new Vector2(-29.830f, 35.070f),
+        new Vector2(-43.185f, 19.356f),
+        new Vector2(-6.300f, 30.470f),
+        new Vector2(-17.900f, 32.610f),
+        new Vector2(-28.870f, 9.720f),
+        new Vector2(-57.380f, -8.467f),
+        new Vector2(-59.943f, -5.463f),
+        new Vector2(-22.810f, 29.310f),
+        new Vector2(-46.855f, 10.550f),
+        new Vector2(-9.648f, 40.093f),
+        new Vector2(-28.791f, 113.740f),
+        new Vector2(-15.211f, 128.183f),
+        new Vector2(-10.299f, 120.733f),
+        new Vector2(-27.820f, 139.120f),
+        new Vector2(-5.150f, 153.540f),
+        new Vector2(-40.700f, 11.500f),
+        new Vector2(-31.059f, 63.360f),
+        new Vector2(-22.160f, 135.040f),
+        new Vector2(-22.160f, 148.910f),
+        new Vector2(-11.485f, 14.768f),
+        new Vector2(-22.860f, 146.300f),
+        new Vector2(-33.996f, 12.170f),
+        new Vector2(-17.130f, 159.550f),
+        new Vector2(-35.040f, 68.828f),
+        new Vector2(-32.326f, 40.619f),
+        new Vector2(-15.012f, 14.502f),
+        new Vector2(-22.160f, 168.050f),
+    };
+
+    private void InitTapPlatforms()
+    {
+        _tapPlatforms = new HashSet<Collider2D>();
+        if (_moth == null)
+        {
+            _tapTotalCount = 0;
+            return;
+        }
+
+        const float tolerance = 0.01f;
+        foreach (var col in FindObjectsOfType<Collider2D>())
+        {
+            if (!col.enabled || !col.gameObject.activeInHierarchy)
+                continue;
+            if (col.isTrigger)
+                continue;
+            var c = col.bounds.center;
+            for (int i = 0; i < TapPlatformPositions.Length; i++)
+            {
+                if (Mathf.Abs(c.x - TapPlatformPositions[i].x) < tolerance
+                    && Mathf.Abs(c.y - TapPlatformPositions[i].y) < tolerance)
+                {
+                    _tapPlatforms.Add(col);
+                    break;
+                }
+            }
+        }
+        _tapTotalCount = _tapPlatforms.Count;
+    }
+
+    private void TickTapMode()
+    {
+        if (!_tapMode || _tapComplete || _moth == null || _rb == null)
+            return;
+
+        if (_tapTimerRunning)
+            _tapTimer += Time.deltaTime;
+
+        // Check contacts every frame — register any whitelisted platform
+        // the moth is touching with an upward normal
+        {
+            var contacts = new List<ContactPoint2D>();
+            _rb.GetContacts(contacts);
+            foreach (var contact in contacts)
+            {
+                if (contact.normal.y <= 0.9f)
+                    continue;
+                var plat = contact.collider;
+                if (plat == null || !_tapPlatforms.Contains(plat) || _tapTouchedPlatforms.Contains(plat))
+                    continue;
+                _tapTouchedPlatforms.Add(plat);
+            }
+
+            if (_tapTouchedPlatforms.Count >= _tapTotalCount)
+            {
+                _tapTimerRunning = false;
+                _tapComplete = true;
+                Logger.LogInfo("TigerMoth: All platforms touched! Time: " + FormatTime(_tapTimer));
+                SaveTapGhost();
+            }
+        }
+    }
+
+    private void SaveTapDiscovery()
+    {
+        if (_tapTouchedPlatforms == null || _tapTouchedPlatforms.Count == 0)
+            return;
+        try
+        {
+            string path = Path.Combine(BepInEx.Paths.ConfigPath, "TigerMoth_tap_discovery.txt");
+            var lines = new List<string>();
+            foreach (var col in _tapTouchedPlatforms)
+            {
+                if (col == null) continue;
+                lines.Add(ColliderKey(col));
+            }
+            lines.Sort();
+            File.WriteAllLines(path, lines.ToArray());
+            Logger.LogInfo("TigerMoth: TAP discovery saved (" + lines.Count + " platforms) to " + path);
+        }
+        catch (System.Exception e)
+        {
+            Logger.LogError("TigerMoth: failed to save TAP discovery: " + e.Message);
+        }
+    }
+
+    private void SaveTapGhost()
+    {
+        if (_ghostRecording == null || _ghostRecording.Count == 0)
+            return;
+        if (_tapBestTime > 0f && _tapTimer >= _tapBestTime)
+        {
+            Logger.LogInfo("TigerMoth: TAP time " + FormatTime(_tapTimer)
+                + " did not beat best " + FormatTime(_tapBestTime));
+            return;
+        }
+        try
+        {
+            var frames = _ghostRecording.ToArray();
+            WriteGhostFrames(TapGhostPath(), frames);
+            _tapGhostFrames = frames;
+            _tapBestTime = _tapTimer;
+            File.WriteAllText(
+                Path.Combine(BepInEx.Paths.ConfigPath, "TigerMoth_tap_best.txt"),
+                _tapBestTime.ToString("F4", CultureInfo.InvariantCulture));
+            Logger.LogInfo("TigerMoth: New TAP best! " + FormatTime(_tapBestTime)
+                + " (" + frames.Length + " frames)");
+        }
+        catch (System.Exception e)
+        {
+            Logger.LogError("TigerMoth: failed to save TAP ghost: " + e.Message);
+        }
+    }
+
+    private void DrawTapColliders()
+    {
+        if (!_tapMode || _moth == null || Camera.main == null)
+            return;
+        if (Event.current.type != EventType.Repaint)
+            return;
+
+        var cam = Camera.main;
+        Color untouchedColor = new Color(1f, 0.3f, 0.3f, 0.7f);
+        Color touchedColor = new Color(0.3f, 1f, 0.3f, 0.7f);
+
+        foreach (var col in _tapPlatforms)
+        {
+            if (col == null || !col.enabled || !col.gameObject.activeInHierarchy)
+                continue;
+            Color color = _tapTouchedPlatforms.Contains(col) ? touchedColor : untouchedColor;
+            DrawCollider2DScreen(cam, col, color);
+        }
+    }
+
+    private void ClearTapState()
+    {
+        _tapMode = false;
+        _tapPlatforms = null;
+        _tapTouchedPlatforms = null;
+        _tapTimerRunning = false;
+        _tapComplete = false;
+    }
+
     // ── Camera zoom ───────────────────────────────────────
 
+
+    // ── Attempt swarm ──────────────────────────────────────
+
+    private void LoadAllAttempts()
+    {
+        _attemptFrames = new List<GhostFrame[]>();
+        string dir = AttemptsDir();
+        if (!Directory.Exists(dir))
+            return;
+        var files = Directory.GetFiles(dir, "attempt_*.bin");
+        System.Array.Sort(files);
+        foreach (string file in files)
+        {
+            try
+            {
+                var frames = ReadGhostFrames(file);
+                if (frames != null && frames.Length > 0)
+                    _attemptFrames.Add(frames);
+            }
+            catch (System.Exception e)
+            {
+                Logger.LogWarning("TigerMoth: failed to load attempt " + file + ": " + e.Message);
+            }
+        }
+        Logger.LogInfo("TigerMoth: loaded " + _attemptFrames.Count + " attempts");
+    }
+
+    private void CreateAttemptGhosts()
+    {
+        if (_attemptGhosts != null && _attemptGhosts.Count == _attemptFrames.Count)
+            return; // already created
+        DestroyAttemptGhosts();
+        _attemptGhosts = new List<GameObject>(_attemptFrames.Count);
+        if (_moth == null) return;
+
+        var mothSr = _moth.GetComponentInChildren<SpriteRenderer>();
+        if (mothSr == null) return;
+
+        for (int i = 0; i < _attemptFrames.Count; i++)
+        {
+            var go = new GameObject("AttemptGhost_" + i);
+            var sr = go.AddComponent<SpriteRenderer>();
+            sr.sprite = mothSr.sprite;
+            sr.sortingLayerID = mothSr.sortingLayerID;
+            sr.sortingOrder = mothSr.sortingOrder - 1;
+            sr.color = new Color(1f, 1f, 1f, 0.08f);
+            go.SetActive(false);
+            _attemptGhosts.Add(go);
+        }
+    }
+
+    private void DestroyAttemptGhosts()
+    {
+        if (_attemptGhosts == null) return;
+        foreach (var go in _attemptGhosts)
+        {
+            if (go != null)
+                Object.Destroy(go);
+        }
+        _attemptGhosts = null;
+    }
+
+    private void ShowAttemptGhosts(bool show)
+    {
+        if (_attemptGhosts == null) return;
+        foreach (var go in _attemptGhosts)
+        {
+            if (go != null)
+                go.SetActive(show);
+        }
+    }
+
+    private void TickAttemptSwarm()
+    {
+        if (!_attemptSwarmActive || _attemptGhosts == null || !_runActive)
+            return;
+
+        // Sync with main ghost playback index
+        int idx = _ghostPlaybackIndex;
+
+        for (int i = 0; i < _attemptGhosts.Count; i++)
+        {
+            var go = _attemptGhosts[i];
+            if (go == null) continue;
+            var frames = _attemptFrames[i];
+
+            if (idx < frames.Length)
+            {
+                if (!go.activeSelf) go.SetActive(true);
+                var f = frames[idx];
+                go.transform.position = new Vector3(f.x, f.y, 0f);
+                go.transform.eulerAngles = new Vector3(0f, f.flipX ? 180f : 0f, 0f);
+            }
+            else if (go.activeSelf)
+            {
+                go.SetActive(false);
+            }
+        }
+    }
 
     // ── Ghost moth helpers ──────────────────────────────────
 
@@ -2698,36 +3174,6 @@ public class TigerMothPlugin : BaseUnityPlugin
     }
 
     // ── Collider visualization ──────────────────────────────
-
-    private void DrawColliders()
-    {
-        if (!_showColliders || _moth == null || Camera.main == null)
-            return;
-        if (Event.current.type != EventType.Repaint)
-            return;
-
-        var cam = Camera.main;
-        var mothColliders = new HashSet<Collider2D>(_moth.GetComponentsInChildren<Collider2D>());
-        Color mothColor = new Color(0f, 1f, 0f, 0.85f);
-        Color stageColor = new Color(1f, 0.3f, 0.3f, 0.7f);
-        Color triggerColor = new Color(1f, 1f, 0.2f, 0.4f);
-
-        foreach (var col in FindObjectsOfType<Collider2D>())
-        {
-            if (!col.enabled || !col.gameObject.activeInHierarchy)
-                continue;
-
-            Color color;
-            if (mothColliders.Contains(col))
-                color = mothColor;
-            else if (col.isTrigger)
-                color = triggerColor;
-            else
-                color = stageColor;
-
-            DrawCollider2DScreen(cam, col, color);
-        }
-    }
 
     private void DrawCollider2DScreen(Camera cam, Collider2D col, Color color)
     {
@@ -2891,7 +3337,7 @@ public class TigerMothPlugin : BaseUnityPlugin
         new[] { "1-5", "Checkpoints" },
         new[] { "F", "Follow ghost" },
         new[] { "V", "Detail view" },
-        new[] { "C", "Colliders" },
+        new[] { "P", "TAP mode" },
         new[] { "G", "Cycle ghost" },
         new[] { "[", "Zoom in" },
         new[] { "]", "Zoom out" },
@@ -2958,14 +3404,16 @@ public class TigerMothPlugin : BaseUnityPlugin
         DrawOverlay();
 
         // ── Split timer table (top-right) ──
-        if (_runActive && _managedSplits.Count > 0)
+        if (_tapMode)
+            DrawTapTable();
+        else if (_runActive && _managedSplits.Count > 0)
             DrawSplitTable();
 
         // ── Input & physics display (bottom-left) ──
         DrawInputDisplay();
 
         // ── Collider visualization ──
-        DrawColliders();
+        DrawTapColliders();
     }
 
     private void DrawOverlay()
@@ -3174,6 +3622,49 @@ public class TigerMothPlugin : BaseUnityPlugin
     private static readonly Color ColorBehind = new Color(1f, 0.27f, 0.27f);
     private static readonly Color ColorGold = new Color(1f, 0.84f, 0f);
     private static readonly Color ColorGray = new Color(0.5f, 0.5f, 0.5f);
+
+    private void DrawTapTable()
+    {
+        const float tableW = 340f;
+        const float rowH = 46f;
+        const float timerH = 60f;
+        const float pad = 10f;
+        bool hasBest = _tapBestTime > 0f;
+        float tableH = rowH + timerH + 8f + (hasBest ? rowH : 0f);
+
+        float tableX = Screen.width - tableW - pad * 2 - 10f;
+        float tableY = 10f;
+
+        GUI.Box(new Rect(tableX, tableY, tableW + pad * 2, tableH + pad * 2),
+            GUIContent.none, _panelBgStyle);
+
+        float cx = tableX + pad;
+        float cy = tableY + pad;
+
+        int touched = _tapTouchedPlatforms != null ? _tapTouchedPlatforms.Count : 0;
+        string countText = touched + " / " + _tapTotalCount + " platforms";
+        Color countColor = _tapComplete ? ColorAhead : Color.white;
+        var origColor = _splitNameStyle.normal.textColor;
+        _splitNameStyle.normal.textColor = countColor;
+        GUI.Label(new Rect(cx, cy, tableW, rowH), countText, _splitNameStyle);
+        _splitNameStyle.normal.textColor = origColor;
+        cy += rowH + 8f;
+
+        var origTimerColor = _timerStyle.normal.textColor;
+        _timerStyle.normal.textColor = _tapComplete ? ColorAhead : Color.white;
+        GUI.Label(new Rect(cx, cy, tableW, timerH), FormatTime(_tapTimer), _timerStyle);
+        _timerStyle.normal.textColor = origTimerColor;
+        cy += timerH;
+
+        if (hasBest)
+        {
+            var orig2 = _splitNameStyle.normal.textColor;
+            _splitNameStyle.normal.textColor = ColorGray;
+            GUI.Label(new Rect(cx, cy, tableW, rowH),
+                "Best: " + FormatTime(_tapBestTime), _splitNameStyle);
+            _splitNameStyle.normal.textColor = orig2;
+        }
+    }
 
     private void DrawSplitTable()
     {
