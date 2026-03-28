@@ -11,7 +11,7 @@ using UnityEngine.SceneManagement;
 [BepInPlugin("com.speedrun.tigermoth", "TigerMoth", Version)]
 public class TigerMothPlugin : BaseUnityPlugin
 {
-    const string Version = "1.2.0";
+    const string Version = "1.3.0";
 
     // ── Split definitions (hardcoded order) ───────────────
     private static readonly string[] SplitNames = { "Church", "Gift", "Tower", "End" };
